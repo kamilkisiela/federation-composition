@@ -1978,7 +1978,7 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
     }
     pub fn set_provides(self, type_name: &str, field_name: &str, provides: &str) -> JsResult<()> {
         if self.is_interface_object(type_name) {
-            return Ok(());
+            return self.interface_field().set_provides(type_name, field_name, provides);
         }
 
         self.field(type_name, field_name)?.provides = Some(provides.to_string());
@@ -2328,6 +2328,10 @@ impl<'s> InterfaceTypeFieldBuilder<'s> {
     }
     pub fn set_requires(self, type_name: &str, field_name: &str, requires: &str) -> JsResult<()> {
         self.field(type_name, field_name)?.requires = Some(requires.to_string());
+        Ok(())
+    }
+    pub fn set_provides(self, type_name: &str, field_name: &str, provides: &str) -> JsResult<()> {
+        self.field(type_name, field_name)?.provides = Some(provides.to_string());
         Ok(())
     }
     pub fn set_shareable(self, type_name: &str, field_name: &str) -> JsResult<()> {
@@ -3388,8 +3392,7 @@ mod tests {
         let id = &foo.fields["id"];
         assert_eq!(id.r#type, "ID!");
         assert!(id.shareable);
-        // setProvides is ignored for interface objects.
-        assert_eq!(id.provides, None);
+        assert_eq!(id.provides.as_deref(), Some("x"));
         assert!(id.args["arg"].tags.contains("t"));
         assert_eq!(
             foo.keys,
