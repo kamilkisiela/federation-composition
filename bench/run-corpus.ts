@@ -3,17 +3,22 @@
 //
 // Usage: pnpm bench:corpus <implementation> [out.json]
 // (node conformance/upstream-bin.mjs tsx --expose-gc bench/run-corpus.ts ...), where
-// <implementation> is "guild-ts" (upstream's TypeScript in conformance/upstream/src) or
+// <implementation> is "guild-ts" (upstream's TypeScript in conformance/upstream/src),
 // "guild-wasm" (the npm package @lemonberrylabs/federation-composition-wasm as built in npm/dist, so AST
-// conversion across the boundary is included). Run `pnpm conformance` first; it checks out
+// conversion across the boundary is included) or "guild-napi" (the napi-rs addon built by
+// `node crates/federation-composition-napi/build.mjs`). Run `pnpm conformance` first; it checks out
 // upstream, builds the package and records the corpus.
+//
+// BENCH_MODE=e2e times what a schema service does instead: from each subgraph's SDL string to the
+// supergraph SDL string (parse, compose, read `supergraphSdl`). guild-napi only takes SDL, so it
+// always runs this way.
 // Native Rust uses the same protocol: crates/federation-composition/examples/corpus_bench.rs.
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import type { DocumentNode } from "graphql";
 
 // graphql-js from the upstream checkout (this workspace has no copy of its own).
-const { print } = createRequire(
+const { parse, print } = createRequire(
   new URL("../conformance/upstream/package.json", import.meta.url),
 )("graphql") as typeof import("graphql");
 const corpusFile =
@@ -28,29 +33,59 @@ type Case = {
   success: boolean;
 };
 
-const [label = "guild-ts", outFile = `bench/results-${label}.json`] =
-  process.argv.slice(2);
+const [implementation = "guild-ts", outArg] = process.argv.slice(2);
+const e2e = process.env.BENCH_MODE === "e2e" || implementation === "guild-napi";
+const label =
+  e2e && implementation !== "guild-napi"
+    ? `${implementation}-e2e`
+    : implementation;
+const outFile = outArg ?? `bench/results-${label}.json`;
 
 const implementations = {
   "guild-ts": () => import("../conformance/upstream/src/compose.js"),
   "guild-wasm": () => import("../npm/dist/compose.js"),
+  "guild-napi": async () =>
+    createRequire(import.meta.url)(
+      "../crates/federation-composition-napi/federation-composition.node",
+    ),
 };
-if (!(label in implementations)) {
-  throw new Error(`Unknown implementation "${label}"`);
+if (!(implementation in implementations)) {
+  throw new Error(`Unknown implementation "${implementation}"`);
 }
 const { composeServices } =
-  await implementations[label as keyof typeof implementations]();
+  await implementations[implementation as keyof typeof implementations]();
 
 const corpus: Case[] = readFileSync(corpusFile, "utf8")
   .split("\n")
   .filter(Boolean)
   .map((line) => JSON.parse(line));
 
-// The timed region is composeServices() only, on already-parsed ASTs.
-const prepared = corpus.map((c) => ({
-  ...c,
-  sdlBytes: c.services.reduce((n, s) => n + print(s.typeDefs).length, 0),
-}));
+// The timed region is composeServices() only, on already-parsed ASTs (or, with e2e, from SDL
+// strings to the supergraph SDL).
+// With e2e, cases whose ASTs do not print to parsable SDL (hand-built in upstream's tests) are
+// skipped: no SDL-based caller can send them.
+const roundTrips = (c: Case) => {
+  try {
+    c.services.forEach((s) => parse(print(s.typeDefs)));
+    return true;
+  } catch {
+    return false;
+  }
+};
+const prepared = corpus
+  .filter((c) => !e2e || roundTrips(c))
+  .map((c) => {
+    const sdlServices = c.services.map((s) => ({
+      name: s.name,
+      url: s.url,
+      sdl: print(s.typeDefs),
+    }));
+    return {
+      ...c,
+      sdlServices,
+      sdlBytes: sdlServices.reduce((n, s) => n + s.sdl.length, 0),
+    };
+  });
 
 const gc = (globalThis as any).gc as undefined | (() => void);
 const MIN_RUNS = 5;
@@ -60,7 +95,22 @@ const MAX_RUNS = 200;
 const results = [];
 const started = performance.now();
 for (const c of prepared) {
-  const run = () => composeServices(c.services, c.internal);
+  const run = !e2e
+    ? () => composeServices(c.services, c.internal)
+    : implementation === "guild-napi"
+      ? () => composeServices(c.sdlServices, c.internal)
+      : () => {
+          const result = composeServices(
+            c.sdlServices.map((s) => ({
+              name: s.name,
+              url: s.url,
+              typeDefs: parse(s.sdl),
+            })),
+            c.internal,
+          );
+          result.supergraphSdl;
+          return result;
+        };
   const first = run();
   const success = !("errors" in first && first.errors);
   if (success !== c.success) {

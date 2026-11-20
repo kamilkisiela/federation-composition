@@ -6,6 +6,9 @@
 //! (`pnpm bench:native`), or with mimalloc as the global allocator:
 //! `cargo run -p federation-composition --release --features mimalloc --example corpus_bench -- bench/results-guild-rust-mimalloc.json`
 //! (`pnpm bench:native:mimalloc`).
+//!
+//! `BENCH_MODE=e2e` times from each subgraph's SDL string to the supergraph SDL string (parse,
+//! compose, print), as `bench/run-corpus.ts` does with the same variable.
 
 // Opt in with `--features mimalloc`. The library never sets a global allocator; final artifacts do.
 #[cfg(feature = "mimalloc")]
@@ -58,9 +61,11 @@ const LABEL: &str = if cfg!(feature = "mimalloc") {
 };
 
 fn main() {
+    let e2e = std::env::var("BENCH_MODE").as_deref() == Ok("e2e");
+    let label = if e2e { format!("{LABEL}-e2e") } else { LABEL.to_string() };
     let out_file = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| format!("bench/results-{LABEL}.json"));
+        .unwrap_or_else(|| format!("bench/results-{label}.json"));
     // The conformance corpus (see tests/corpus.rs).
     let corpus_path = std::env::var("CONFORMANCE_CORPUS")
         .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../conformance/out/corpus.jsonl").to_string());
@@ -83,9 +88,33 @@ fn main() {
         let internal = case.internal.as_ref().map(|i| InternalOptions {
             disable_validation_rules: i.disable_validation_rules.clone(),
         });
-        let sdl_bytes: usize = services.iter().map(|s| graphql_core::print(&s.type_defs).len()).sum();
+        let sdls: Vec<String> = services.iter().map(|s| graphql_core::print(&s.type_defs)).collect();
+        let sdl_bytes: usize = sdls.iter().map(String::len).sum();
+        // As in bench/run-corpus.ts: e2e skips the cases whose (hand-built) ASTs do not print to
+        // parsable SDL.
+        if e2e && sdls.iter().any(|sdl| graphql_core::parse(sdl).is_err()) {
+            continue;
+        }
 
-        let run = || compose_services(black_box(&services), internal.as_ref()).expect("composition does not throw");
+        let run = || {
+            if !e2e {
+                return compose_services(black_box(&services), internal.as_ref()).expect("composition does not throw");
+            }
+            let parsed: Vec<ServiceDefinition> = services
+                .iter()
+                .zip(black_box(&sdls))
+                .map(|(s, sdl)| ServiceDefinition {
+                    name: s.name.clone(),
+                    url: s.url.clone(),
+                    type_defs: graphql_core::parse(sdl).expect("printed SDL parses"),
+                })
+                .collect();
+            let result = compose_services(&parsed, internal.as_ref()).expect("composition does not throw");
+            if let CompositionResult::Success(success) = &result {
+                black_box(success.supergraph_sdl());
+            }
+            result
+        };
         let success = matches!(run(), CompositionResult::Success(_));
         assert_eq!(success, case.success, "{}: success differs from TypeScript", case.id);
         for _ in 0..WARMUP_RUNS {
@@ -115,12 +144,12 @@ fn main() {
     let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
     std::fs::write(
         &out_file,
-        serde_json::to_string_pretty(&json!({ "label": LABEL, "node": null, "wallMs": wall_ms, "results": results }))
+        serde_json::to_string_pretty(&json!({ "label": label, "node": null, "wallMs": wall_ms, "results": results }))
             .unwrap(),
     )
     .unwrap();
     println!(
-        "{LABEL}: {} cases in {:.1}s -> {out_file}",
+        "{label}: {} cases in {:.1}s -> {out_file}",
         results.len(),
         wall_ms / 1000.0
     );

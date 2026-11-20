@@ -32,3 +32,8 @@ name = "federation-composition-wasm"
 git_only = true
 semver_check = false
 changelog_path = "crates/federation-composition-wasm/CHANGELOG.md"
+
+# The napi-rs addon is an unpublished experiment (bench/README.md): never released.
+[[package]]
+name = "federation-composition-napi"
+release = false

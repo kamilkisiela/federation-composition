@@ -1,0 +1,30 @@
+[package]
+name = "federation-composition-napi"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# napi-rs 3 needs Rust 1.88, newer than the workspace MSRV; the MSRV job of ci.yml skips this crate.
+rust-version = "1.88"
+authors.workspace = true
+# Experimental: a Node-API addon for comparing against the WebAssembly package. Not published.
+publish = false
+description = "Node-API (napi-rs) bindings of federation_composition: SDL strings in, supergraph SDL out"
+
+[lib]
+crate-type = ["cdylib"]
+# The addon's Node-API symbols are only resolved when Node loads it, so a test binary would not link.
+test = false
+doctest = false
+
+[dependencies]
+graphql-core = { version = "0.1.0", path = "../graphql-core" }
+federation-composition = { version = "0.1.0", path = "../federation-composition" }
+
+# Node-API has no wasm32 target: the workspace's wasm32 builds compile this crate as empty.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+napi = "3.16.2"
+napi-derive = "3.7.1"
+
+[build-dependencies]
+napi-build = "2.6.0"

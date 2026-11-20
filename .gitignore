@@ -13,3 +13,5 @@ npm/dist
 # The upstream checkout and everything the conformance check writes (pnpm conformance).
 conformance/upstream
 conformance/out
+# The napi-rs addon (node crates/federation-composition-napi/build.mjs).
+*.node

@@ -27,6 +27,11 @@ allow = [
 confidence-threshold = 0.93
 # Unused entries in `allow` are an error, so the list stays the set actually in use.
 unused-allowed-license = "deny"
+# Single-crate exceptions, for a license that is compatible but used by nothing else.
+exceptions = [
+  # ISC (permissive, MIT-compatible): libloading, through napi-sys of the napi-rs addon.
+  { crate = "libloading", allow = ["ISC"] },
+]
 
 [licenses.private]
 # The workspace's own crates are checked like any other (they are MIT).
