@@ -2,7 +2,9 @@
 //!
 //! Edges live in their `Graph`'s arena and are referred to by [`EdgeId`]; identity checks
 //! (`edge === other`, `previousEdges.includes(edge)`) compare ids. `head`/`tail` are node ids
-//! of the same graph. The resolvability cache is filled while walking, so it is a `RefCell`.
+//! of the same graph. The resolvability records are added while walking, so they are in a
+//! `RefCell`. They are not a cache: a record made for some visited graphs answers later checks
+//! that visited more, so dropping them would change which moves the walk accepts.
 //!
 //! NOTE(port): in TS several edges can share one `Move` object (`new Edge(head, edge.move, tail)`
 //! in `duplicateNode`, `connectUnionOrInterface` and the `@provides` rewiring), and
@@ -12,27 +14,33 @@
 //! value in the same iteration (no edge is ignored before that loop ends).
 
 use std::cell::RefCell;
-use std::rc::Rc;
 
-use super::errors::{OneOrMany, SatisfiabilityError};
+use super::errors::LazyError;
 use super::graph::Graph;
-use super::helpers::{Lazy, OverrideLabels};
+use super::helpers::OverrideLabels;
 use super::moves::{FieldMoveOverride, Move};
-use super::node::{GraphNameId, NodeId};
+use super::node::{GraphNameId, GraphNameSet, NodeId};
 use crate::utils::js::{JsError, JsResult};
 
 /// Index of an edge in its graph's edge arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct EdgeId(pub usize);
+pub struct EdgeId(u32);
 
-/// A shared lazy satisfiability error (`Lazy<SatisfiabilityError>`).
-pub type LazySatisfiabilityError<'s> = Rc<Lazy<'s, JsResult<OneOrMany<SatisfiabilityError>>>>;
+impl EdgeId {
+    pub fn new(index: usize) -> Self {
+        EdgeId(index as u32)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// `EdgeResolvabilityResult`.
 #[derive(Clone, Debug)]
 pub enum EdgeResolvabilityResult<'s> {
     Success,
-    Failure { error: LazySatisfiabilityError<'s> },
+    Failure { error: LazyError<'s> },
 }
 
 impl EdgeResolvabilityResult<'_> {
@@ -45,9 +53,10 @@ impl EdgeResolvabilityResult<'_> {
 #[derive(Debug)]
 pub struct Edge<'s> {
     pub head: NodeId,
-    pub r#move: Move,
+    pub r#move: Move<'s>,
     pub tail: NodeId,
-    resolvable: RefCell<Vec<(Vec<GraphNameId>, OverrideLabels, EdgeResolvabilityResult<'s>)>>,
+    /// `resolvable`: the outcome of each check, with the graphs and labels it was made for.
+    resolvable: RefCell<Vec<(GraphNameSet, OverrideLabels<'s>, EdgeResolvabilityResult<'s>)>>,
     ignored: bool,
 }
 
@@ -102,7 +111,7 @@ pub fn assert_field_edge(graph: &Graph<'_>, edge: EdgeId) -> JsResult<()> {
 }
 
 impl<'s> Edge<'s> {
-    pub fn new(head: NodeId, r#move: Move, tail: NodeId) -> Self {
+    pub fn new(head: NodeId, r#move: Move<'s>, tail: NodeId) -> Self {
         Edge {
             head,
             r#move,
@@ -120,14 +129,8 @@ impl<'s> Edge<'s> {
         self.ignored
     }
 
-    /// `isCrossGraphEdge()`: needs the nodes' graph ids, so the graph provides them
-    /// (`Graph::is_cross_graph_edge`).
-    pub fn is_cross_graph_edge(&self, head_graph_id: &str, tail_graph_id: &str) -> bool {
-        head_graph_id != tail_graph_id
-    }
-
     /// `updateOverride(override)`. Throws when the move is not a field move.
-    pub fn update_override(&mut self, r#override: FieldMoveOverride) -> JsResult<()> {
+    pub fn update_override(&mut self, r#override: FieldMoveOverride<'s>) -> JsResult<()> {
         match &mut self.r#move {
             Move::Field(m) => {
                 m.r#override = Some(r#override);
@@ -140,22 +143,19 @@ impl<'s> Edge<'s> {
         }
     }
 
-    /// `getResolvability(graphNames, labelValues)`.
-    /// PERF: the caller's `graphNames` is `concatIfNotExistsString(visitedGraphs, graphName)`;
-    /// it is passed as its two parts so that the list is not built for every lookup.
+    /// `getResolvability(graphNames, labelValues)`. The caller's `graphNames` is
+    /// `concatIfNotExistsString(visitedGraphs, graphName)`, passed as its two parts.
     pub fn get_resolvability(
         &self,
-        visited_graphs: &[GraphNameId],
+        visited_graphs: &GraphNameSet,
         graph_name: GraphNameId,
-        label_values: &OverrideLabels,
+        label_values: &OverrideLabels<'s>,
     ) -> Option<EdgeResolvabilityResult<'s>> {
         self.resolvable
             .borrow()
             .iter()
             .find(|(checked_graph_names, checked_label_values, _)| {
-                checked_graph_names
-                    .iter()
-                    .all(|name| *name == graph_name || visited_graphs.contains(name))
+                checked_graph_names.is_subset_of_with(visited_graphs, graph_name)
                     && checked_label_values.matches(label_values)
             })
             .map(|(_, _, result)| result.clone())
@@ -166,9 +166,9 @@ impl<'s> Edge<'s> {
     pub fn set_resolvable(
         &self,
         success: bool,
-        graph_names: Vec<GraphNameId>,
-        label_values: OverrideLabels,
-        error: Option<LazySatisfiabilityError<'s>>,
+        graph_names: GraphNameSet,
+        label_values: OverrideLabels<'s>,
+        error: Option<LazyError<'s>>,
     ) -> EdgeResolvabilityResult<'s> {
         let result = if success {
             EdgeResolvabilityResult::Success

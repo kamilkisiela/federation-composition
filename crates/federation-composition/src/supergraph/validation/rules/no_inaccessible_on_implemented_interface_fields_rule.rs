@@ -12,7 +12,7 @@ use graphql_core::GraphQLError;
 /// `@inaccessible` applied.
 /// Visitor callbacks: `ObjectTypeField`.
 pub struct NoInaccessibleOnImplementedInterfaceFieldsRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
 }
 
 impl<'s> SupergraphRule<'s> for NoInaccessibleOnImplementedInterfaceFieldsRule<'s> {
@@ -35,7 +35,7 @@ impl<'s> SupergraphVisitor<'s> for NoInaccessibleOnImplementedInterfaceFieldsRul
                 let Some(interface_type) = self.supergraph.interface_types.get(interface_name) else {
                     continue;
                 };
-                let Some(interface_field) = interface_type.fields.get(&field_state.name) else {
+                let Some(interface_field) = interface_type.fields.get(field_state.name) else {
                     continue;
                 };
 

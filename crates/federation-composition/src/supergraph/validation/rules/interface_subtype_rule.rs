@@ -16,7 +16,7 @@ use graphql_core::GraphQLError;
 /// `InterfaceSubtypeRule(context, supergraph)`. Fields: `implementations_map` (built in `new`).
 /// Visitor callbacks: `ObjectTypeField`.
 pub struct InterfaceSubtypeRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
     implementations_map: IndexMap<String, IndexSet<String>>,
 }
 
@@ -79,14 +79,14 @@ impl<'s> SupergraphVisitor<'s> for InterfaceSubtypeRule<'s> {
                 continue;
             };
 
-            let Some(interface_field) = interface_state.fields.get(&field_state.name) else {
+            let Some(interface_field) = interface_state.fields.get(field_state.name) else {
                 continue;
             };
 
             if !is_type_sub_type_of(
                 self.supergraph,
                 &self.implementations_map,
-                &field_state.r#type,
+                field_state.r#type,
                 &interface_field.r#type,
             ) {
                 cx.report_error(GraphQLError::with_code(
@@ -221,7 +221,7 @@ fn type_name(ty: SupergraphType<'_>) -> &str {
 // TS: the `SupergraphType` union lists enum and scalar states, which `getTypeFromSupergraph` never returns.
 #[allow(dead_code)]
 enum SupergraphType<'s> {
-    Object(&'s ObjectTypeState),
+    Object(&'s ObjectTypeState<'s>),
     Enum(&'s EnumTypeState),
     Scalar(&'s ScalarTypeState),
     Union(&'s UnionTypeState),

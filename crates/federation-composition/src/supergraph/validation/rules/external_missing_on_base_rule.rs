@@ -12,7 +12,7 @@ use graphql_core::GraphQLError;
 /// `ExternalMissingOnBaseRule(context, supergraph)`.
 /// Visitor callbacks: `ObjectType`, `ObjectTypeField`.
 pub struct ExternalMissingOnBaseRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
 }
 
 impl<'s> SupergraphRule<'s> for ExternalMissingOnBaseRule<'s> {
@@ -108,7 +108,7 @@ impl<'s> SupergraphVisitor<'s> for ExternalMissingOnBaseRule<'s> {
                         continue;
                     }
 
-                    let Some(interface_field_state) = interface_state.fields.get(&field_state.name) else {
+                    let Some(interface_field_state) = interface_state.fields.get(field_state.name) else {
                         continue;
                     };
 

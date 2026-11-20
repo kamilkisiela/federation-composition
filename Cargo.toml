@@ -14,7 +14,8 @@ authors = ["Ran Magen"]
 
 [workspace.dependencies]
 indexmap = "2"
-rustc-hash = "2"
+# No default features: the RNG features would pull getrandom into the wasm32 build.
+ahash = { version = "0.8.12", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 

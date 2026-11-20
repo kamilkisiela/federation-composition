@@ -4,23 +4,23 @@
 //! They are variants of [`GraphId`].
 
 /// The `id: string | Symbol` of a satisfiability `Graph`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum GraphId {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GraphId<'s> {
     /// A subgraph's id (`Symbol.for(id)` in TS).
-    Subgraph(String),
+    Subgraph(&'s str),
     /// `SUPERGRAPH_ID = Symbol("__supergraph__")`.
     Supergraph,
     /// `MERGEDGRAPH_ID = Symbol("__mergedgraph__")`.
     MergedGraph,
 }
 
-impl GraphId {
+impl<'s> GraphId<'s> {
     /// `this.id`: the subgraph id, or `Symbol(...).toString()` for the two symbols.
-    pub fn to_id_string(&self) -> String {
+    pub fn as_str(self) -> &'s str {
         match self {
-            GraphId::Subgraph(id) => id.clone(),
-            GraphId::Supergraph => "Symbol(__supergraph__)".to_string(),
-            GraphId::MergedGraph => "Symbol(__mergedgraph__)".to_string(),
+            GraphId::Subgraph(id) => id,
+            GraphId::Supergraph => "Symbol(__supergraph__)",
+            GraphId::MergedGraph => "Symbol(__mergedgraph__)",
         }
     }
 }

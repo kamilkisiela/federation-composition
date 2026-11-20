@@ -38,16 +38,16 @@ impl<'s> SupergraphVisitor<'s> for RequiredArgumentMissingInSomeSubgraph {
                 return Ok(());
             }
 
-            let graphs_with_required_arg: Vec<&String> = arg_state
+            let graphs_with_required_arg: Vec<&str> = arg_state
                 .by_graph
                 .iter()
                 .filter(|(_, arg)| arg.r#type.ends_with('!'))
                 .map(|(graph, _)| graph)
                 .collect();
-            let graphs_without_arg: Vec<&String> = field_state
+            let graphs_without_arg: Vec<&str> = field_state
                 .by_graph
                 .keys()
-                .filter(|graph| !arg_state.by_graph.contains_key(*graph))
+                .filter(|graph| !arg_state.by_graph.contains_key(graph))
                 .collect();
 
             let required_in = format!(

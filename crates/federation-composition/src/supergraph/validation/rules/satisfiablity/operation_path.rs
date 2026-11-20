@@ -3,6 +3,8 @@
 //! A path holds node/edge ids of one graph (the supergraph graph for a walker's `superPath`,
 //! the merged graph otherwise); methods that need the edges take that graph.
 
+use smallvec::SmallVec;
+
 use super::contexts::ContextMask;
 use super::edge::{is_field_edge, EdgeId};
 use super::graph::Graph;
@@ -11,18 +13,35 @@ use super::node::NodeId;
 
 /// `Step = FieldStep | AbstractStep`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Step {
+pub enum Step<'s> {
     /// `FieldStep`: `{ fieldName, typeName }`.
-    Field { field_name: String, type_name: String },
+    Field { field_name: &'s str, type_name: &'s str },
     /// `AbstractStep`: `{ typeName }`.
-    Abstract { type_name: String },
+    Abstract { type_name: &'s str },
+}
+
+impl<'s> Step<'s> {
+    pub fn type_name(&self) -> &'s str {
+        match *self {
+            Step::Field { type_name, .. } | Step::Abstract { type_name } => type_name,
+        }
+    }
+
+    /// `fieldName` of a field step.
+    pub fn field_name(&self) -> Option<&'s str> {
+        match *self {
+            Step::Field { field_name, .. } => Some(field_name),
+            Step::Abstract { .. } => None,
+        }
+    }
 }
 
 /// `OperationPath`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperationPath {
     root_node: NodeId,
-    previous_edges: Vec<EdgeId>,
+    /// Paths are short, so most never leave the inline buffer when cloned and extended.
+    previous_edges: SmallVec<[EdgeId; 16]>,
     /// Contexts set by the types we moved out of (the ancestors of the path's tail).
     contexts_in_scope: ContextMask,
 }
@@ -31,7 +50,7 @@ impl OperationPath {
     pub fn new(root_node: NodeId) -> Self {
         OperationPath {
             root_node,
-            previous_edges: Vec::new(),
+            previous_edges: SmallVec::new(),
             contexts_in_scope: ContextMask::zero(),
         }
     }
@@ -59,14 +78,7 @@ impl OperationPath {
 
     /// `path.clone().move(edge)`.
     pub fn moved(&self, graph: &Graph<'_>, edge: EdgeId) -> OperationPath {
-        // PERF: the copy is sized for the new edge, so `move` does not reallocate it.
-        let mut previous_edges = Vec::with_capacity(self.previous_edges.len() + 1);
-        previous_edges.extend_from_slice(&self.previous_edges);
-        let mut new_path = OperationPath {
-            root_node: self.root_node,
-            previous_edges,
-            contexts_in_scope: self.contexts_in_scope.clone(),
-        };
+        let mut new_path = self.clone();
         new_path.r#move(graph, edge);
         new_path
     }
@@ -96,18 +108,18 @@ impl OperationPath {
         self.previous_edges.last().copied()
     }
 
-    pub fn steps(&self, graph: &Graph<'_>) -> Vec<Step> {
+    pub fn steps<'s>(&self, graph: &Graph<'s>) -> Vec<Step<'s>> {
         self.previous_edges
             .iter()
             .map(|&edge| {
                 let e = graph.edge(edge);
                 match &e.r#move {
                     Move::Field(m) => Step::Field {
-                        type_name: m.type_name.clone(),
-                        field_name: m.field_name.clone(),
+                        type_name: m.type_name,
+                        field_name: m.field_name.as_str(),
                     },
                     _ => Step::Abstract {
-                        type_name: graph.node(e.tail).type_name.clone(),
+                        type_name: graph.node(e.tail).type_name,
                     },
                 }
             })

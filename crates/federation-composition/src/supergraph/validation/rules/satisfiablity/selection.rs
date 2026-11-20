@@ -1,14 +1,12 @@
 //! Port of `src/supergraph/validation/rules/satisfiablity/selection.ts`.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use std::cmp::Ordering;
 use std::fmt;
+use std::rc::Rc;
 
-use crate::utils::collections::IndexMap;
 use graphql_core::{Field as FieldNode, InlineFragment, Selection as SelectionAstNode, SelectionSet};
 
+use super::node::{FieldName, FieldNames};
 use crate::subgraph::helpers::parse_fields;
 use crate::supergraph::state::SupergraphState;
 use crate::utils::js::{locale_compare, JsError, JsResult};
@@ -49,38 +47,38 @@ fn collapse_whitespace(source: &str) -> String {
     out
 }
 
-/// `Field` (`kind: "field"`).
+/// `Field` (`kind: "field"`). The names are the supergraph state's.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Field {
-    pub type_name: String,
-    pub field_name: String,
-    pub selection_set: Option<Vec<SelectionNode>>,
+pub struct Field<'s> {
+    pub type_name: &'s str,
+    pub field_name: FieldName<'s>,
+    pub selection_set: Option<Vec<SelectionNode<'s>>>,
 }
 
 /// `Fragment` (`kind: "fragment"`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Fragment {
-    pub type_name: String,
-    pub selection_set: Vec<SelectionNode>,
+pub struct Fragment<'s> {
+    pub type_name: &'s str,
+    pub selection_set: Vec<SelectionNode<'s>>,
 }
 
 /// `SelectionNode = Field | Fragment`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SelectionNode {
-    Field(Field),
-    Fragment(Fragment),
+pub enum SelectionNode<'s> {
+    Field(Field<'s>),
+    Fragment(Fragment<'s>),
 }
 
-impl SelectionNode {
-    pub fn type_name(&self) -> &str {
+impl<'s> SelectionNode<'s> {
+    pub fn type_name(&self) -> &'s str {
         match self {
-            SelectionNode::Field(f) => &f.type_name,
-            SelectionNode::Fragment(f) => &f.type_name,
+            SelectionNode::Field(f) => f.type_name,
+            SelectionNode::Fragment(f) => f.type_name,
         }
     }
 
     /// `selectionSet` (`null` for a leaf field).
-    pub fn selection_set(&self) -> Option<&[SelectionNode]> {
+    pub fn selection_set(&self) -> Option<&[SelectionNode<'s>]> {
         match self {
             SelectionNode::Field(f) => f.selection_set.as_deref(),
             SelectionNode::Fragment(f) => Some(&f.selection_set),
@@ -88,17 +86,17 @@ impl SelectionNode {
     }
 }
 
-/// `Selection`: resolved key/requires/provides fields. Shared (`Rc<Selection>`) between the
-/// resolver cache and the moves, as the TS shares the object.
+/// `Selection`: resolved key/requires/provides fields, shared (`Rc<Selection>`) by the edges
+/// created for one field or key.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Selection {
-    type_name: String,
-    source: String,
-    pub selection_set: Vec<SelectionNode>,
+pub struct Selection<'s> {
+    type_name: &'s str,
+    source: &'s str,
+    pub selection_set: Vec<SelectionNode<'s>>,
 }
 
-impl Selection {
-    pub fn new(type_name: String, source: String, selection_set: Vec<SelectionNode>) -> Self {
+impl<'s> Selection<'s> {
+    pub fn new(type_name: &'s str, source: &'s str, selection_set: Vec<SelectionNode<'s>>) -> Self {
         Selection {
             type_name,
             source,
@@ -112,9 +110,8 @@ impl Selection {
         self.contains_in(type_name, field_name, &self.selection_set)
     }
 
-    pub fn equals(&self, other: &Selection) -> bool {
-        // PERF: resolved selections are shared (`Rc<Selection>`), and a selection equals itself
-        // (same type name and source), so identity answers without comparing strings.
+    pub fn equals(&self, other: &Selection<'_>) -> bool {
+        // A selection equals itself (same type name and source).
         if std::ptr::eq(self, other) {
             return true;
         }
@@ -130,7 +127,11 @@ impl Selection {
         self.selection_set_equal(&self.selection_set, &other.selection_set)
     }
 
-    fn selection_set_equal(&self, selection_set: &[SelectionNode], other_selection_set: &[SelectionNode]) -> bool {
+    fn selection_set_equal(
+        &self,
+        selection_set: &[SelectionNode<'_>],
+        other_selection_set: &[SelectionNode<'_>],
+    ) -> bool {
         if selection_set.len() != other_selection_set.len() {
             return false;
         }
@@ -178,9 +179,9 @@ impl Selection {
     /// `_contains(typeName, fieldName, selectionSet)`.
     // TS: only `contains` calls it.
     #[allow(dead_code)]
-    fn contains_in(&self, type_name: &str, field_name: &str, selection_set: &[SelectionNode]) -> bool {
+    fn contains_in(&self, type_name: &str, field_name: &str, selection_set: &[SelectionNode<'_>]) -> bool {
         selection_set.iter().any(|s| {
-            (matches!(s, SelectionNode::Field(f) if f.type_name == type_name && f.field_name == field_name))
+            (matches!(s, SelectionNode::Field(f) if f.type_name == type_name && f.field_name.as_str() == field_name))
                 || match s.selection_set() {
                     Some(inner) => self.contains_in(type_name, field_name, inner),
                     None => false,
@@ -189,37 +190,33 @@ impl Selection {
     }
 }
 
-impl fmt::Display for Selection {
+impl fmt::Display for Selection<'_> {
     /// `toString()`: the source with whitespace runs collapsed (JS `\s+`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&collapse_whitespace(&self.source))
+        f.write_str(&collapse_whitespace(self.source))
     }
 }
 
-/// `SelectionResolver`: parses and resolves field sets, with a cache keyed by
-/// `typeName/keyFields`. Shared as `Rc<SelectionResolver>` by all graphs of a `Supergraph`.
+/// `SelectionResolver`: parses and resolves field sets.
+/// NOTE(port): the TS caches the result per `typeName/keyFields`. Nothing relies on resolved
+/// selections being shared (`equals` compares them), and resolving is cheap next to the walk,
+/// so each call resolves.
 #[derive(Debug)]
 pub struct SelectionResolver<'s> {
-    cache: RefCell<IndexMap<String, Rc<Selection>>>,
-    supergraph_state: &'s SupergraphState,
+    supergraph_state: &'s SupergraphState<'s>,
+    field_names: Rc<FieldNames<'s>>,
 }
 
 impl<'s> SelectionResolver<'s> {
-    pub fn new(supergraph_state: &'s SupergraphState) -> Self {
+    pub fn new(supergraph_state: &'s SupergraphState, field_names: Rc<FieldNames<'s>>) -> Self {
         SelectionResolver {
-            cache: RefCell::new(IndexMap::default()),
             supergraph_state,
+            field_names,
         }
     }
 
     /// `resolve(typeName, keyFields)`. Throws for an unknown type or unparsable fields.
-    pub fn resolve(&self, type_name: &str, key_fields: &str) -> JsResult<Rc<Selection>> {
-        let key = self.key_factory(type_name, key_fields);
-
-        if let Some(cached) = self.cache.borrow().get(&key) {
-            return Ok(cached.clone());
-        }
-
+    pub fn resolve(&self, type_name: &'s str, key_fields: &'s str) -> JsResult<Rc<Selection<'s>>> {
         let type_state_exists = self.supergraph_state.object_types.contains_key(type_name)
             || self.supergraph_state.interface_types.contains_key(type_name)
             || self.supergraph_state.union_types.contains_key(type_name);
@@ -236,29 +233,37 @@ impl<'s> SelectionResolver<'s> {
             )));
         };
 
-        let fields = Rc::new(Selection::new(
-            type_name.to_string(),
-            key_fields.to_string(),
+        Ok(Rc::new(Selection::new(
+            type_name,
+            key_fields,
             self.resolve_selection_set_node(type_name, &selection_set_node)?,
-        ));
-        self.cache.borrow_mut().insert(key, fields.clone());
-
-        Ok(fields)
-    }
-
-    fn key_factory(&self, type_name: &str, key_fields: &str) -> String {
-        format!("{type_name}/{key_fields}")
+        )))
     }
 
     /// `objectTypes.get(typeName) ?? interfaceTypes.get(typeName)`, as `Some(fields)` where
     /// `fields` gives the output type of a field.
-    fn object_or_interface_field_type(&self, type_name: &str, field_name: &str) -> Option<Option<&'s str>> {
+    /// The state's names are returned with the type: `(type name, field name, field type)`.
+    fn object_or_interface_field_type(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<Option<(&'s str, &'s str, &'s str)>> {
         let state = self.supergraph_state;
         if let Some(object_state) = state.object_types.get(type_name) {
-            return Some(object_state.fields.get(field_name).map(|f| f.r#type.as_str()));
+            return Some(
+                object_state
+                    .fields
+                    .get_key_value(field_name)
+                    .map(|(name, f)| (object_state.name.as_str(), *name, f.r#type)),
+            );
         }
         if let Some(interface_state) = state.interface_types.get(type_name) {
-            return Some(interface_state.fields.get(field_name).map(|f| f.r#type.as_str()));
+            return Some(
+                interface_state
+                    .fields
+                    .get_key_value(field_name)
+                    .map(|(name, f)| (interface_state.name.as_str(), name.as_str(), f.r#type.as_str())),
+            );
         }
         None
     }
@@ -267,7 +272,7 @@ impl<'s> SelectionResolver<'s> {
         &self,
         type_name: &str,
         field_node: &FieldNode,
-        selection_set: &mut Vec<SelectionNode>,
+        selection_set: &mut Vec<SelectionNode<'s>>,
     ) -> JsResult<()> {
         if field_node.name.value == "__typename" {
             return Ok(());
@@ -277,7 +282,7 @@ impl<'s> SelectionResolver<'s> {
             return Err(JsError::error(format!("Type \"{type_name}\" is not defined.")));
         };
 
-        let Some(field_type) = field_type else {
+        let Some((type_name, field_name, field_type)) = field_type else {
             return Err(JsError::error(format!(
                 "Type \"{type_name}\" does not have field \"{}\".",
                 field_node.name.value
@@ -289,15 +294,15 @@ impl<'s> SelectionResolver<'s> {
 
             let resolved = self.resolve_selection_set_node(&output_type, inner_selection_set)?;
             selection_set.push(SelectionNode::Field(Field {
-                type_name: type_name.to_string(),
-                field_name: field_node.name.value.clone(),
+                type_name,
+                field_name: self.field_names.intern(field_name),
                 selection_set: Some(resolved),
             }));
         } else {
             // it's a leaf
             selection_set.push(SelectionNode::Field(Field {
-                type_name: type_name.to_string(),
-                field_name: field_node.name.value.clone(),
+                type_name,
+                field_name: self.field_names.intern(field_name),
                 selection_set: None,
             }));
         }
@@ -310,10 +315,10 @@ impl<'s> SelectionResolver<'s> {
         &self,
         _type_name: &str,
         fragment_node: &InlineFragment,
-        selection_set: &mut Vec<SelectionNode>,
+        selection_set: &mut Vec<SelectionNode<'s>>,
     ) -> JsResult<()> {
         let type_name = match &fragment_node.type_condition {
-            Some(type_condition) if !type_condition.name.value.is_empty() => type_condition.name.value.clone(),
+            Some(type_condition) if !type_condition.name.value.is_empty() => type_condition.name.value.as_str(),
             _ => {
                 return Err(JsError::error(
                     "Inline fragment without type condition is not supported.",
@@ -321,14 +326,17 @@ impl<'s> SelectionResolver<'s> {
             }
         };
 
-        let type_state_exists = self.supergraph_state.object_types.contains_key(&type_name)
-            || self.supergraph_state.interface_types.contains_key(&type_name);
-
-        if !type_state_exists {
+        let state = self.supergraph_state;
+        let state_type_name = state
+            .object_types
+            .get(type_name)
+            .map(|t| t.name.as_str())
+            .or_else(|| state.interface_types.get(type_name).map(|t| t.name.as_str()));
+        let Some(type_name) = state_type_name else {
             return Err(JsError::error(format!("Type \"{type_name}\" is not defined.")));
-        }
+        };
 
-        let resolved = self.resolve_selection_set_node(&type_name, &fragment_node.selection_set)?;
+        let resolved = self.resolve_selection_set_node(type_name, &fragment_node.selection_set)?;
         selection_set.push(SelectionNode::Fragment(Fragment {
             type_name,
             selection_set: resolved,
@@ -341,7 +349,7 @@ impl<'s> SelectionResolver<'s> {
         &self,
         type_name: &str,
         selection_set_node: &SelectionSet,
-    ) -> JsResult<Vec<SelectionNode>> {
+    ) -> JsResult<Vec<SelectionNode<'s>>> {
         let mut selection_set = Vec::new();
 
         for selection in &selection_set_node.selections {
@@ -360,14 +368,14 @@ impl<'s> SelectionResolver<'s> {
     }
 
     /// `sort(selectionSet)`: the comparator of the TS (by kind, type name, field name).
-    fn sort(&self, mut selection_set: Vec<SelectionNode>) -> Vec<SelectionNode> {
+    fn sort(&self, mut selection_set: Vec<SelectionNode<'s>>) -> Vec<SelectionNode<'s>> {
         selection_set.sort_by(compare_selection_nodes);
         selection_set
     }
 }
 
 /// The comparator of `SelectionResolver#sort`.
-fn compare_selection_nodes(a: &SelectionNode, b: &SelectionNode) -> Ordering {
+fn compare_selection_nodes(a: &SelectionNode<'_>, b: &SelectionNode<'_>) -> Ordering {
     match (a, b) {
         // sort fields by typeName.fieldName
         (SelectionNode::Field(a), SelectionNode::Field(b)) => locale_compare(
@@ -375,7 +383,7 @@ fn compare_selection_nodes(a: &SelectionNode, b: &SelectionNode) -> Ordering {
             &format!("{}.{}", b.type_name, b.field_name),
         ),
         // sort fragments by typeName
-        (SelectionNode::Fragment(a), SelectionNode::Fragment(b)) => locale_compare(&a.type_name, &b.type_name),
+        (SelectionNode::Fragment(a), SelectionNode::Fragment(b)) => locale_compare(a.type_name, b.type_name),
         // field -> fragment
         (SelectionNode::Field(_), SelectionNode::Fragment(_)) => Ordering::Less,
         (SelectionNode::Fragment(_), SelectionNode::Field(_)) => Ordering::Greater,
@@ -385,25 +393,26 @@ fn compare_selection_nodes(a: &SelectionNode, b: &SelectionNode) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supergraph::validation::rules::satisfiablity::node::test_field_name;
 
-    fn leaf(type_name: &str, field_name: &str) -> SelectionNode {
+    fn leaf(type_name: &'static str, field_name: &'static str) -> SelectionNode<'static> {
         SelectionNode::Field(Field {
-            type_name: type_name.into(),
-            field_name: field_name.into(),
+            type_name,
+            field_name: test_field_name(field_name),
             selection_set: None,
         })
     }
 
-    fn fragment(type_name: &str, selection_set: Vec<SelectionNode>) -> SelectionNode {
+    fn fragment(type_name: &'static str, selection_set: Vec<SelectionNode<'static>>) -> SelectionNode<'static> {
         SelectionNode::Fragment(Fragment {
-            type_name: type_name.into(),
+            type_name,
             selection_set,
         })
     }
 
     #[test]
     fn to_string_collapses_js_whitespace() {
-        let s = Selection::new("User".into(), "  id\n\t name \u{a0}\u{feff}x\u{85}y ".into(), vec![]);
+        let s = Selection::new("User", "  id\n\t name \u{a0}\u{feff}x\u{85}y ", vec![]);
         // U+0085 is not JS whitespace; U+00A0 and U+FEFF are.
         assert_eq!(s.to_string(), " id name x\u{85}y ");
     }
@@ -425,7 +434,7 @@ mod tests {
         let names: Vec<String> = resolver_sorted
             .iter()
             .map(|s| match s {
-                SelectionNode::Field(f) => f.field_name.clone(),
+                SelectionNode::Field(f) => f.field_name.to_string(),
                 SelectionNode::Fragment(f) => format!("... on {}", f.type_name),
             })
             .collect();
@@ -436,26 +445,22 @@ mod tests {
     #[test]
     fn equals_and_contains() {
         let a = Selection::new(
-            "User".into(),
-            "id profile { name }".into(),
+            "User",
+            "id profile { name }",
             vec![
                 leaf("User", "id"),
                 SelectionNode::Field(Field {
-                    type_name: "User".into(),
-                    field_name: "profile".into(),
+                    type_name: "User",
+                    field_name: test_field_name("profile"),
                     selection_set: Some(vec![leaf("Profile", "name")]),
                 }),
             ],
         );
-        let b = Selection::new("User".into(), "id  profile { name }".into(), a.selection_set.clone());
+        let b = Selection::new("User", "id  profile { name }", a.selection_set.clone());
         assert!(a.equals(&b));
-        let c = Selection::new(
-            "User".into(),
-            "id profile".into(),
-            vec![leaf("User", "id"), leaf("User", "profile")],
-        );
+        let c = Selection::new("User", "id profile", vec![leaf("User", "id"), leaf("User", "profile")]);
         assert!(!a.equals(&c));
-        let d = Selection::new("Other".into(), "id profile { name }".into(), a.selection_set.clone());
+        let d = Selection::new("Other", "id profile { name }", a.selection_set.clone());
         assert!(!a.equals(&d));
         assert!(a.contains("Profile", "name"));
         assert!(a.contains("User", "id"));

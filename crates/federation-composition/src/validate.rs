@@ -376,7 +376,6 @@ pub fn validate(
 
     // We build the state of the supergraph as we validate the supergraph.
     // We do it for better performance (less iterations and shit like that).
-    let mut state = create_supergraph_state_builder();
     let subgraph_states: SubgraphStates = subgraph_state_builders
         .into_iter()
         .map(|(id, builder)| {
@@ -388,7 +387,9 @@ pub fn validate(
             )
         })
         .collect();
-    let supergraph_errors = validate_supergraph(subgraph_states, &mut state, internal)?;
+    // The supergraph state borrows from the subgraph states, so it is created after them.
+    let mut state = create_supergraph_state_builder();
+    let supergraph_errors = validate_supergraph(&subgraph_states, &mut state, internal)?;
 
     // If supergraph-level errors are detected, we skip the generation of a supergraph.
     // It's corrupted anyway...

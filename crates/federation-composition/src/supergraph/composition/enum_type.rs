@@ -21,13 +21,13 @@ pub fn enum_type_builder() -> EnumTypeBuilder {
     EnumTypeBuilder
 }
 
-impl TypeBuilder<EnumType, EnumTypeState> for EnumTypeBuilder {
+impl<'a> TypeBuilder<'a, EnumType, EnumTypeState> for EnumTypeBuilder {
     fn visit_subgraph_state(
         &mut self,
-        graph: &Graph,
+        graph: &'a Graph,
         state: &mut IndexMap<String, EnumTypeState>,
-        type_name: &str,
-        ty: &EnumType,
+        type_name: &'a str,
+        ty: &'a EnumType,
     ) {
         let enum_type_state = get_or_create_enum_type(state, type_name);
 
@@ -307,7 +307,7 @@ fn get_or_create_enum_type<'s>(
         referenced_by_output_type: false,
         input_type_references: IndexSet::default(),
         output_type_references: IndexSet::default(),
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         ast: Ast { directives: vec![] },
     })
 }
@@ -322,7 +322,7 @@ fn get_or_create_enum_value<'s>(
         inaccessible: false,
         deprecated: None,
         description: None,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         ast: Ast { directives: vec![] },
     })
 }

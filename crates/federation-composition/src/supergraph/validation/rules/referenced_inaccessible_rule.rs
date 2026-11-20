@@ -11,7 +11,7 @@ use graphql_core::GraphQLError;
 /// `ReferencedInaccessibleRule(context, supergraph)`.
 /// Visitor callbacks: `ObjectTypeField`, `ObjectTypeFieldArg`.
 pub struct ReferencedInaccessibleRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
 }
 
 impl<'s> SupergraphRule<'s> for ReferencedInaccessibleRule<'s> {
@@ -36,7 +36,7 @@ impl<'s> SupergraphVisitor<'s> for ReferencedInaccessibleRule<'s> {
             return Ok(());
         }
         // `fieldState.type.replace(/[\[\]\!]+/g, "")`
-        let output_type_name = strip_all_modifiers(&field_state.r#type);
+        let output_type_name = strip_all_modifiers(field_state.r#type);
         let references_inaccessible =
             find_output_type(self.supergraph, &output_type_name).is_some_and(|t| t.inaccessible);
 

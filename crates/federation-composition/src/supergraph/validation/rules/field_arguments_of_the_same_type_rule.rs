@@ -69,7 +69,7 @@ impl<'s> SupergraphVisitor<'s> for FieldArgumentsOfTheSameTypeRule {
             type_to_graphs
                 .entry(normalized_output_type)
                 .or_default()
-                .push(graph_name.clone());
+                .push(graph_name.to_string());
         }
 
         if type_to_graphs.len() > 1 {
@@ -126,7 +126,7 @@ impl<'s> SupergraphVisitor<'s> for FieldArgumentsOfTheSameTypeRule {
             types_per_subgraph
                 .entry(arg.r#type.clone())
                 .or_default()
-                .insert(graph_name.clone());
+                .insert(graph_name.to_string());
         }
 
         if types_per_subgraph.len() == 1 {

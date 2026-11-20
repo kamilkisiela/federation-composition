@@ -13,7 +13,7 @@ use graphql_core::GraphQLError;
 /// `AuthOnContextRule(context, supergraph)`.
 /// Visitor callbacks: `ObjectTypeField`.
 pub struct AuthOnContextRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
 }
 
 impl<'s> SupergraphRule<'s> for AuthOnContextRule<'s> {
@@ -91,7 +91,7 @@ fn contextual_args(field_state: &ObjectTypeFieldState) -> Vec<ContextualArg> {
         for (graph_id, arg_in_graph) in &arg.by_graph {
             if let Some(from_context) = &arg_in_graph.from_context {
                 args.push(ContextualArg {
-                    graph_id: graph_id.clone(),
+                    graph_id: graph_id.to_string(),
                     from_context: from_context.clone(),
                 });
             }

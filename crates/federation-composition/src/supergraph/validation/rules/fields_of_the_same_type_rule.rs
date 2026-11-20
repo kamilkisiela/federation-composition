@@ -45,7 +45,7 @@ pub(super) fn strip_all_modifiers(ty: &str) -> Cow<'_, str> {
 /// The `groups` of the error message: `type "<outputType>" in subgraph(s) "<a>", "<b>"`.
 fn type_groups<K: AsRef<str>>(
     cx: &SupergraphValidationContext,
-    type_to_graphs: &IndexMap<K, Vec<&String>>,
+    type_to_graphs: &IndexMap<K, Vec<&str>>,
 ) -> JsResult<Vec<String>> {
     type_to_graphs
         .iter()
@@ -144,17 +144,17 @@ impl<'s> SupergraphVisitor<'s> for FieldsOfTheSameTypeRule {
             field_state
                 .by_graph
                 .values()
-                .map(|field| object_field_output_type(&field_state.r#type, &field.r#type)),
+                .map(|field| object_field_output_type(field_state.r#type, field.r#type)),
         ) {
             return Ok(());
         }
 
         // PERF: the keys and graph names borrow from the state instead of being cloned.
-        let mut type_to_graphs: IndexMap<Cow<'s, str>, Vec<&'s String>> = IndexMap::default();
+        let mut type_to_graphs: IndexMap<Cow<'s, str>, Vec<&'s str>> = IndexMap::default();
         let mut type_name_to_possible_type_names: IndexMap<Cow<'s, str>, IndexSet<String>> = IndexMap::default();
 
         for (graph_name, field) in &field_state.by_graph {
-            let type_name = strip_all_modifiers(&field.r#type);
+            let type_name = strip_all_modifiers(field.r#type);
             let type_state = cx
                 .subgraph_states
                 .get(graph_name)
@@ -176,7 +176,7 @@ impl<'s> SupergraphVisitor<'s> for FieldsOfTheSameTypeRule {
                 _ => {}
             }
 
-            let field_output_type = object_field_output_type(&field_state.r#type, &field.r#type);
+            let field_output_type = object_field_output_type(field_state.r#type, field.r#type);
 
             type_to_graphs.entry(field_output_type).or_default().push(graph_name);
         }
@@ -236,7 +236,7 @@ impl<'s> SupergraphVisitor<'s> for FieldsOfTheSameTypeRule {
         }
 
         // PERF: the keys and graph names borrow from the state instead of being cloned.
-        let mut type_to_graphs: IndexMap<Cow<'s, str>, Vec<&'s String>> = IndexMap::default();
+        let mut type_to_graphs: IndexMap<Cow<'s, str>, Vec<&'s str>> = IndexMap::default();
 
         for (graph_name, field) in &field_state.by_graph {
             let normalized_output_type = input_field_output_type(&field_state.r#type, &field.r#type);

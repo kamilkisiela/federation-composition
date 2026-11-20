@@ -20,6 +20,7 @@ use graphql_core::{
     SchemaDefinition, StringValue, Type, UnionTypeDefinition, UnionTypeExtension, Value, VisitAction, VisitInfo,
     Visitor,
 };
+use std::rc::Rc;
 
 use crate::graphql::printer::print;
 use crate::graphql::type_node_info::TypeNodeInfo;
@@ -364,7 +365,8 @@ pub struct ListSize {
 /// `supergraph/composition/common.ts`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubgraphGraph {
-    pub id: String,
+    /// Shared by every per-graph entry of the supergraph state.
+    pub id: Rc<str>,
     pub name: String,
     pub version: FederationVersion,
     pub url: Option<String>,
@@ -581,7 +583,7 @@ pub fn create_subgraph_state_builder(
 
     let state = SubgraphState {
         graph: SubgraphGraph {
-            id: graph.id.clone(),
+            id: graph.id.as_str().into(),
             name: graph.name.clone(),
             version,
             url: graph.url.clone(),

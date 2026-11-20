@@ -24,9 +24,11 @@ use crate::utils::state::{is_list, is_non_null, strip_non_null, strip_type_modif
 /// Visitor callbacks: `InterfaceType`, `ObjectType`, `InterfaceTypeField`, `ObjectTypeField`.
 /// Fields: the locals of the TS factory (and `supergraph` if the callbacks read it).
 pub struct SatisfiabilityRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
     /// The satisfiability supergraph graph: resolves the edges of each tracker's `superPath`.
     supergraph_graph: Rc<Graph<'s>>,
+    /// The merged graph: resolves each tracker's errors.
+    merged_graph: Rc<Graph<'s>>,
     error_by_coordinate: IndexMap<String, Vec<WalkTracker<'s>>>,
 }
 
@@ -38,6 +40,7 @@ impl<'s> SupergraphRule<'s> for SatisfiabilityRule<'s> {
 
         let unreachables = satisfiability_supergraph.validate()?;
         let supergraph_graph = satisfiability_supergraph.supergraph_graph().clone();
+        let merged_graph = satisfiability_supergraph.merged_graph().clone();
 
         // NOTE(port): a plain object in TS. Lookups of inherited keys (a type named `constructor`
         // or `toString`) would hit `Object.prototype` there; such type names are not handled.
@@ -53,7 +56,7 @@ impl<'s> SupergraphRule<'s> for SatisfiabilityRule<'s> {
                 Move::Field(field_move) if is_field_edge(e) => {
                     format!("{}.{}", field_move.type_name, field_move.field_name)
                 }
-                _ => supergraph_graph.node(e.head).type_name.clone(),
+                _ => supergraph_graph.node(e.head).type_name.to_string(),
             };
 
             error_by_coordinate.entry(coordinate).or_default().push(unreachable);
@@ -62,6 +65,7 @@ impl<'s> SupergraphRule<'s> for SatisfiabilityRule<'s> {
         Ok(SatisfiabilityRule {
             supergraph,
             supergraph_graph,
+            merged_graph,
             error_by_coordinate,
         })
     }
@@ -121,21 +125,7 @@ impl<'s> SatisfiabilityRule<'s> {
         }
 
         for unreachable in unreachables {
-            let query_path: QueryPath = unreachable
-                .super_path
-                .steps(&self.supergraph_graph)
-                .into_iter()
-                .map(|step| match step {
-                    Step::Field { field_name, type_name } => QueryPathEntry {
-                        type_name,
-                        field_name: Some(field_name),
-                    },
-                    Step::Abstract { type_name } => QueryPathEntry {
-                        type_name,
-                        field_name: None,
-                    },
-                })
-                .collect();
+            let query_path = unreachable.super_path.steps(&self.supergraph_graph);
             let query_string = print_query_path(self.supergraph, &query_path)?;
 
             if query_string.is_empty() {
@@ -146,7 +136,7 @@ impl<'s> SatisfiabilityRule<'s> {
             let mut errors_by_source_graph: IndexMap<String, Vec<SatisfiabilityError>> = IndexMap::default();
             let mut reasons: Vec<(String, Vec<String>)> = Vec::new();
 
-            for error in unreachable.list_errors(&self.supergraph_graph)? {
+            for error in unreachable.list_errors(&self.supergraph_graph, &self.merged_graph)? {
                 errors_by_source_graph
                     .entry(error.source_graph_name.clone())
                     .or_default()
@@ -229,19 +219,9 @@ impl<'s> SupergraphVisitor<'s> for SatisfiabilityRule<'s> {
         object_state: &'s ObjectTypeState,
         field_state: &'s ObjectTypeFieldState,
     ) -> JsResult<()> {
-        self.check(cx, &object_state.name, Some(&field_state.name))
+        self.check(cx, &object_state.name, Some(field_state.name))
     }
 }
-
-/// An entry of `QueryPath`: `{ typeName, fieldName }` or `{ typeName }`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QueryPathEntry {
-    pub type_name: String,
-    pub field_name: Option<String>,
-}
-
-/// `QueryPath`.
-pub type QueryPath = Vec<QueryPathEntry>;
 
 fn print_line(msg: &str, indent_level: usize) -> String {
     "  ".repeat(indent_level + 1) + msg
@@ -258,7 +238,7 @@ struct PrintedField<'a> {
 impl<'a> PrintedField<'a> {
     fn of_object(f: &'a ObjectTypeFieldState) -> Self {
         PrintedField {
-            r#type: &f.r#type,
+            r#type: f.r#type,
             graph_count: f.by_graph.len(),
             args: f
                 .args
@@ -296,17 +276,20 @@ impl<'a> PrintedField<'a> {
 }
 
 /// `printQueryPath(supergraphState, queryPath)`: the example operation in the error message.
-fn print_query_path(supergraph_state: &SupergraphState, query_path: &QueryPath) -> JsResult<String> {
+/// The query path is the walk's `steps()`: a field step is `{ typeName, fieldName }`, an
+/// abstract step `{ typeName }`.
+fn print_query_path(supergraph_state: &SupergraphState, query_path: &[Step<'_>]) -> JsResult<String> {
     let mut lines: Vec<String> = Vec::new();
 
     let mut ends_with_scalar = false;
 
     for (i, point) in query_path.iter().enumerate() {
-        if let Some(field_name) = &point.field_name {
-            let Some(type_state) = supergraph_state.object_types.get(&point.type_name) else {
+        let point_type_name = point.type_name();
+        if let Some(field_name) = point.field_name() {
+            let Some(type_state) = supergraph_state.object_types.get(point_type_name) else {
                 return Err(JsError::error(format!(
                     "Object type \"{}\" not found in Supergraph state",
-                    point.type_name
+                    point_type_name
                 )));
             };
 
@@ -331,7 +314,7 @@ fn print_query_path(supergraph_state: &SupergraphState, query_path: &QueryPath) 
             let Some(field_state) = field_state else {
                 return Err(JsError::error(format!(
                     "Field \"{}.{field_name}\" not found in Supergraph state",
-                    point.type_name
+                    point_type_name
                 )));
             };
 
@@ -369,7 +352,7 @@ fn print_query_path(supergraph_state: &SupergraphState, query_path: &QueryPath) 
                 lines.push(print_line(&format!("{field_name}{args_printed} {{"), i));
             }
         } else {
-            lines.push(print_line(&format!("... on {} {{", point.type_name), i));
+            lines.push(print_line(&format!("... on {} {{", point_type_name), i));
         }
     }
 
@@ -389,9 +372,9 @@ fn print_query_path(supergraph_state: &SupergraphState, query_path: &QueryPath) 
             "Cannot read properties of undefined (reading 'typeName')",
         ));
     };
-    if first.type_name == "Query" {
+    if first.type_name() == "Query" {
         lines.insert(0, "{".to_string());
-    } else if first.type_name == "Mutation" {
+    } else if first.type_name() == "Mutation" {
         lines.insert(0, "mutation {".to_string());
     } else {
         lines.insert(0, "subscription {".to_string());
@@ -515,9 +498,9 @@ mod tests {
         };
         use crate::supergraph::state::SupergraphState;
 
-        fn field_in_graph(ty: &str) -> FieldStateInGraph {
+        fn field_in_graph(ty: &'static str) -> FieldStateInGraph<'static> {
             FieldStateInGraph {
-                r#type: ty.to_string(),
+                r#type: ty,
                 external: false,
                 description: None,
                 inaccessible: false,
@@ -529,8 +512,8 @@ mod tests {
                 provided: false,
                 required: false,
                 authenticated: false,
-                policies: vec![],
-                scopes: vec![],
+                policies: &[],
+                scopes: &[],
                 shareable: false,
                 used_as_key: false,
                 extension: false,
@@ -538,10 +521,10 @@ mod tests {
             }
         }
 
-        fn field(name: &str, ty: &str, graphs: &[&str]) -> ObjectTypeFieldState {
+        fn field(name: &'static str, ty: &'static str, graphs: &[&str]) -> ObjectTypeFieldState<'static> {
             ObjectTypeFieldState {
-                name: name.to_string(),
-                r#type: ty.to_string(),
+                name,
+                r#type: ty,
                 tags: IndexSet::default(),
                 inaccessible: false,
                 is_leaf: false,
@@ -562,24 +545,24 @@ mod tests {
             }
         }
 
-        fn type_in_graph() -> ObjectTypeStateInGraph {
+        fn type_in_graph() -> ObjectTypeStateInGraph<'static> {
             ObjectTypeStateInGraph {
                 has_definition: true,
                 extension: false,
                 extension_type: None,
                 external: false,
                 authenticated: false,
-                policies: vec![],
-                scopes: vec![],
-                keys: vec![],
-                interfaces: IndexSet::default(),
+                policies: &[],
+                scopes: &[],
+                keys: &[],
+                interfaces: Box::leak(Box::default()),
                 inaccessible: false,
                 shareable: false,
                 version: FederationVersion::V2_3,
             }
         }
 
-        fn object(name: &str, graphs: &[&str], fields: Vec<ObjectTypeFieldState>) -> ObjectTypeState {
+        fn object(name: &str, graphs: &[&str], fields: Vec<ObjectTypeFieldState<'static>>) -> ObjectTypeState<'static> {
             ObjectTypeState {
                 name: name.to_string(),
                 tags: IndexSet::default(),
@@ -592,7 +575,7 @@ mod tests {
                 has_definition: true,
                 by_graph: graphs.iter().map(|g| (g.to_string(), type_in_graph())).collect(),
                 interfaces: IndexSet::default(),
-                fields: fields.into_iter().map(|f| (f.name.clone(), f)).collect(),
+                fields: fields.into_iter().map(|f| (f.name, f)).collect(),
                 is_entity: false,
                 description: None,
                 ast: Default::default(),
@@ -602,7 +585,7 @@ mod tests {
         fn subgraph(id: &str) -> Rc<SubgraphState> {
             Rc::new(SubgraphState {
                 graph: SubgraphGraph {
-                    id: id.to_string(),
+                    id: id.into(),
                     name: id.to_string(),
                     version: FederationVersion::V2_3,
                     url: None,
@@ -621,7 +604,7 @@ mod tests {
 
         /// Subgraph a: `type Query { user: User } type User { id: ID }`.
         /// Subgraph b: `type User { name: String }` (no `@key`).
-        pub fn unreachable_field() -> SupergraphState {
+        pub fn unreachable_field() -> SupergraphState<'static> {
             let mut state = SupergraphState::default();
             state.subgraphs.insert("a".into(), subgraph("a"));
             state.subgraphs.insert("b".into(), subgraph("b"));
@@ -641,7 +624,7 @@ mod tests {
         }
 
         /// Both fields of `User` are in subgraph a.
-        pub fn satisfiable() -> SupergraphState {
+        pub fn satisfiable() -> SupergraphState<'static> {
             let mut state = SupergraphState::default();
             state.subgraphs.insert("a".into(), subgraph("a"));
             state.object_types.insert(
@@ -671,12 +654,12 @@ mod tests {
                 graphql_core::OperationType::Query,
                 &[
                     Step::Field {
-                        field_name: "user".into(),
-                        type_name: "Query".into(),
+                        field_name: "user",
+                        type_name: "Query",
                     },
                     Step::Field {
-                        field_name: "name".into(),
-                        type_name: "User".into(),
+                        field_name: "name",
+                        type_name: "User",
                     },
                 ],
             )
@@ -693,28 +676,14 @@ mod tests {
 
         let graph = supergraph.supergraph_graph();
         let unreachable = &unreachables[0];
-        let query_path: QueryPath = unreachable
-            .super_path
-            .steps(graph)
-            .into_iter()
-            .map(|step| match step {
-                Step::Field { field_name, type_name } => QueryPathEntry {
-                    type_name,
-                    field_name: Some(field_name),
-                },
-                Step::Abstract { type_name } => QueryPathEntry {
-                    type_name,
-                    field_name: None,
-                },
-            })
-            .collect();
+        let query_path = unreachable.super_path.steps(graph);
         assert_eq!(
             print_query_path(&state, &query_path).unwrap(),
             "{\n  user {\n    name\n  }\n}"
         );
 
         let messages: Vec<String> = unreachable
-            .list_errors(graph)
+            .list_errors(graph, supergraph.merged_graph())
             .unwrap()
             .into_iter()
             .map(|e| format!("{}: {}", e.source_graph_name, e.message))

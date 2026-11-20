@@ -2,18 +2,18 @@
 
 use std::rc::Rc;
 
-use crate::utils::collections::IndexMap;
 use graphql_core::OperationType;
+use smallvec::SmallVec;
 
 use super::contexts::ContextMask;
 use super::edge::{is_abstract_edge, is_field_edge, EdgeId};
 use super::errors::{LazyErrors, SatisfiabilityError, SatisfiabilityErrorKind};
 use super::finder::{PathFinder, PathFinderResult};
 use super::graph::Graph;
-use super::helpers::{is_truthy_str, OverrideLabels};
+use super::helpers::OverrideLabels;
 use super::move_validator::MoveValidator;
 use super::moves::{FieldMove, Move};
-use super::node::{GraphComboId, NodeId};
+use super::node::{GraphCombo, GraphNameSet, NodeId};
 use super::operation_path::{OperationPath, Step};
 use crate::utils::js::{JsError, JsResult};
 use crate::utils::logger::Logger;
@@ -21,14 +21,14 @@ use crate::utils::logger::Logger;
 /// `WalkTracker`. `super_path` is a path of the supergraph graph, `paths` of the merged graph.
 #[derive(Clone, Debug)]
 pub struct WalkTracker<'s> {
-    errors: LazyErrors<'s, SatisfiabilityError>,
+    errors: LazyErrors<'s>,
     pub super_path: OperationPath,
     pub paths: Vec<OperationPath>,
-    pub label_values: OverrideLabels,
+    pub label_values: OverrideLabels<'s>,
 }
 
 impl<'s> WalkTracker<'s> {
-    pub fn new(super_path: OperationPath, paths: Vec<OperationPath>, label_values: OverrideLabels) -> Self {
+    pub fn new(super_path: OperationPath, paths: Vec<OperationPath>, label_values: OverrideLabels<'s>) -> Self {
         WalkTracker {
             errors: LazyErrors::new(),
             super_path,
@@ -42,24 +42,24 @@ impl<'s> WalkTracker<'s> {
         match &supergraph.edge(edge).r#move {
             Move::Field(field_move) => {
                 if let Some(r#override) = &field_move.r#override {
-                    if let Some(label) = r#override.label.as_deref().filter(|l| !l.is_empty()) {
+                    if let Some(label) = r#override.label.filter(|l| !l.is_empty()) {
                         return Ok(WalkTracker::new(
                             self.super_path.moved(supergraph, edge),
                             Vec::new(),
-                            self.label_values.clone_labels().set(label, r#override.value),
+                            self.label_values.clone().set(label, r#override.value),
                         ));
                     }
                 }
                 Ok(WalkTracker::new(
                     self.super_path.moved(supergraph, edge),
                     Vec::new(),
-                    self.label_values.clone_labels(),
+                    self.label_values.clone(),
                 ))
             }
             Move::Abstract(_) => Ok(WalkTracker::new(
                 self.super_path.moved(supergraph, edge),
                 Vec::new(),
-                self.label_values.clone_labels(),
+                self.label_values.clone(),
             )),
             Move::Entity(_) => Err(JsError::error("Expected edge to be FieldMove or AbstractMove")),
         }
@@ -70,7 +70,7 @@ impl<'s> WalkTracker<'s> {
         self.errors = LazyErrors::new();
     }
 
-    pub fn add_error(&mut self, errors: LazyErrors<'s, SatisfiabilityError>) {
+    pub fn add_error(&mut self, errors: LazyErrors<'s>) {
         self.errors.add_all(errors);
     }
 
@@ -89,9 +89,10 @@ impl<'s> WalkTracker<'s> {
         self.super_path.is_visited_edge(edge)
     }
 
-    /// `listErrors()`: deduplicated by message. Throws if evaluating a lazy error throws.
-    pub fn list_errors(&self, supergraph: &Graph<'s>) -> JsResult<Vec<SatisfiabilityError>> {
-        let all = self.errors.to_array()?;
+    /// `listErrors()`: deduplicated by message. Throws if building a lazy error throws.
+    /// `supergraph` resolves `super_path`, `merged_graph` the errors.
+    pub fn list_errors(&self, supergraph: &Graph<'s>, merged_graph: &Graph<'s>) -> JsResult<Vec<SatisfiabilityError>> {
+        let all = self.errors.to_array(merged_graph)?;
 
         let unique: Vec<&SatisfiabilityError> = all
             .iter()
@@ -111,10 +112,7 @@ impl<'s> WalkTracker<'s> {
                 let steps = self.super_path.steps(supergraph);
                 let last_step = steps.last();
 
-                let last_step_type_name = match last_step {
-                    Some(Step::Field { type_name, .. }) | Some(Step::Abstract { type_name }) => Some(type_name),
-                    None => None,
-                };
+                let last_step_type_name = last_step.map(Step::type_name);
 
                 if last_step_type_name.is_none_or(|t| *t != error.type_name) {
                     return true;
@@ -136,7 +134,12 @@ pub fn default_is_edge_ignored(_edge: EdgeId) -> bool {
 }
 
 /// `ShortestPaths`: shortest path to a node, per set of contexts available on the way to it.
-pub type ShortestPaths = IndexMap<NodeId, IndexMap<ContextMask, OperationPath>>;
+/// Both levels keep first-insertion order, as the TS `Map`s do. A step reaches few nodes, so
+/// they are inline lists searched linearly.
+pub type ShortestPaths = SmallVec<[(NodeId, PathsByContexts); 4]>;
+
+/// The shortest path to one node per set of contexts.
+pub type PathsByContexts = SmallVec<[(ContextMask, OperationPath); 1]>;
 
 /// `walk(method)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,8 +176,8 @@ impl<'s> Walker<'s> {
     }
 
     /// The root `WalkTracker` of a root node of the supergraph graph.
-    fn root_tracker(&self, root_node: NodeId, override_labels: &OverrideLabels) -> JsResult<WalkTracker<'s>> {
-        let root_type_name = &self.supergraph.node(root_node).type_name;
+    fn root_tracker(&self, root_node: NodeId, override_labels: &OverrideLabels<'s>) -> JsResult<WalkTracker<'s>> {
+        let root_type_name = self.supergraph.node(root_node).type_name;
         Ok(WalkTracker::new(
             OperationPath::new(root_node),
             self.merged_graph
@@ -182,14 +185,14 @@ impl<'s> Walker<'s> {
                 .into_iter()
                 .map(OperationPath::new)
                 .collect(),
-            override_labels.clone_labels(),
+            override_labels.clone(),
         ))
     }
 
     /// `walkTrail(operationType, steps)`: walks only the given steps.
     // TS: used by `validateOperation` in `supergraph.ts`, which is defined here and never called in `src/` either.
     #[allow(dead_code)]
-    pub fn walk_trail(&self, operation_type: OperationType, steps: &[Step]) -> JsResult<WalkTracker<'s>> {
+    pub fn walk_trail(&self, operation_type: OperationType, steps: &[Step<'_>]) -> JsResult<WalkTracker<'s>> {
         if steps.is_empty() {
             return Err(JsError::error("Expected at least one step"));
         }
@@ -207,13 +210,13 @@ impl<'s> Walker<'s> {
             )));
         };
 
-        let mut state = self.root_tracker(root_node, &OverrideLabels::new(None))?;
+        let mut state = self.root_tracker(root_node, &OverrideLabels::default())?;
 
         for step in steps {
             let is_edge_ignored = |edge: EdgeId| -> bool {
                 match step {
                     Step::Field { field_name, .. } => match &supergraph.edge(edge).r#move {
-                        Move::Field(field_move) => field_move.field_name != *field_name,
+                        Move::Field(field_move) => field_move.field_name.as_str() != *field_name,
                         _ => true,
                     },
                     Step::Abstract { .. } => true,
@@ -320,9 +323,8 @@ impl<'s> Walker<'s> {
         let supergraph = &*self.supergraph;
         let merged_graph = &*self.merged_graph;
 
-        // PERF: a `Set` of interned strings (`GraphComboIds`); a `Vec` keeps the same insertion
-        // order and the paths are few.
-        let mut graphs_leading_to_node: Vec<GraphComboId> = Vec::new();
+        // A `Set` in TS; a `Vec` keeps the same insertion order and the paths are few.
+        let mut graphs_leading_to_node: Vec<GraphCombo> = Vec::new();
         for p in &state.paths {
             let edge = p.edge();
             let tail = p.tail_or_root(merged_graph);
@@ -347,11 +349,13 @@ impl<'s> Walker<'s> {
             });
 
             // `${tailGraphName}#provides${contextsKey}` or `${tailGraphName}${contextsKey}`
-            let id = supergraph
-                .graph_combo_ids
-                .id(merged_graph, tail, has_provides, p.contexts());
-            if !graphs_leading_to_node.contains(&id) {
-                graphs_leading_to_node.push(id);
+            let combo = GraphCombo {
+                graph: merged_graph.node(tail).graph_name_id,
+                has_provides,
+                contexts: p.contexts().clone(),
+            };
+            if !graphs_leading_to_node.contains(&combo) {
+                graphs_leading_to_node.push(combo);
             }
         }
 
@@ -401,8 +405,7 @@ impl<'s> Walker<'s> {
 
         if let Move::Field(field_move) = &se.r#move {
             if let Some(r#override) = &field_move.r#override {
-                if is_truthy_str(&r#override.label) {
-                    let label = r#override.label.as_deref().unwrap_or_default();
+                if let Some(label) = r#override.label.filter(|l| !l.is_empty()) {
                     let label_value = state.label_values.get(label);
                     if label_value.is_some_and(|v| v != r#override.value) {
                         self.logger.group_end(|| {
@@ -418,10 +421,10 @@ impl<'s> Walker<'s> {
         }
 
         let mut next_state = state.r#move(supergraph, super_edge)?;
-        let mut shortest_path_per_tail: ShortestPaths = IndexMap::default();
+        let mut shortest_path_per_tail = ShortestPaths::new();
         let (target_type_name, target_field_name) = match &se.r#move {
-            Move::Field(field_move) => (field_move.type_name.as_str(), Some(field_move.field_name.as_str())),
-            _ => (supergraph.node(se.tail).type_name.as_str(), None),
+            Move::Field(field_move) => (field_move.type_name, Some(field_move.field_name)),
+            _ => (supergraph.node(se.tail).type_name, None),
         };
         let super_tail_is_leaf = supergraph.node(se.tail).is_leaf;
 
@@ -464,7 +467,7 @@ impl<'s> Walker<'s> {
                 target_type_name,
                 target_field_name,
                 &[],
-                &[],
+                &GraphNameSet::default(),
                 &[],
                 &next_state.label_values,
             )?;
@@ -488,9 +491,8 @@ impl<'s> Walker<'s> {
             });
         }
 
-        // PERF: the map is not used afterwards, so its paths move into the state.
-        for paths_by_contexts in shortest_path_per_tail.into_values() {
-            for shortest_path in paths_by_contexts.into_values() {
+        for (_, paths_by_contexts) in shortest_path_per_tail {
+            for (_, shortest_path) in paths_by_contexts {
                 next_state.add_path(shortest_path);
             }
         }
@@ -507,7 +509,7 @@ impl<'s> Walker<'s> {
             }
         }
 
-        let override_labels = OverrideLabels::new(None);
+        let override_labels = OverrideLabels::default();
 
         for root_node in root_nodes {
             let state = self.root_tracker(root_node, &override_labels)?;
@@ -582,7 +584,7 @@ impl<'s> Walker<'s> {
     }
 
     fn bfs(&self) -> JsResult<Vec<WalkTracker<'s>>> {
-        let override_labels = OverrideLabels::new(None);
+        let override_labels = OverrideLabels::default();
         let mut unreachable: Vec<WalkTracker<'s>> = Vec::new();
         let mut queue: Vec<WalkTracker<'s>> = Vec::new();
 
@@ -647,19 +649,25 @@ struct DfsFrame<'s> {
 
 /// `setShortestPath(shortestPathPerTail, paths)`. Paths reaching the same node are
 /// interchangeable, so only the shortest is kept, per contexts set by their ancestors.
-/// PERF: takes the paths, so the kept ones move into the map.
 fn set_shortest_path(merged_graph: &Graph<'_>, shortest_path_per_tail: &mut ShortestPaths, paths: Vec<OperationPath>) {
     for path in paths {
         let tail = path.tail_or_root(merged_graph);
-        let paths_by_contexts = shortest_path_per_tail.entry(tail).or_default();
-
-        let replace = match paths_by_contexts.get(path.contexts()) {
-            None => true,
-            Some(shortest) => shortest.depth() > path.depth(),
+        let paths_by_contexts = match shortest_path_per_tail.iter().position(|(t, _)| *t == tail) {
+            Some(i) => &mut shortest_path_per_tail[i].1,
+            None => {
+                shortest_path_per_tail.push((tail, PathsByContexts::new()));
+                &mut shortest_path_per_tail.last_mut().expect("just pushed").1
+            }
         };
 
-        if replace {
-            paths_by_contexts.insert(path.contexts().clone(), path);
+        // Replacing a `Map` entry keeps its position.
+        match paths_by_contexts
+            .iter_mut()
+            .find(|(contexts, _)| contexts == path.contexts())
+        {
+            Some((_, shortest)) if shortest.depth() > path.depth() => *shortest = path,
+            Some(_) => {}
+            None => paths_by_contexts.push((path.contexts().clone(), path)),
         }
     }
 }

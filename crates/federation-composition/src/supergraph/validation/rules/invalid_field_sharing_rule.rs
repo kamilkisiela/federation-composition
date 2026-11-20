@@ -13,11 +13,11 @@ use graphql_core::GraphQLError;
 /// `InvalidFieldSharingRule(context, supergraphState)`.
 /// Visitor callbacks: `ObjectTypeField`, `InterfaceTypeField`.
 pub struct InvalidFieldSharingRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
     /// PERF: not in the TS. The result of the "is it the Subscription type" check for the last
     /// object type seen. The check depends only on the object type, and the TS repeats it for
     /// every field (a lookup per subgraph of the type).
-    last_subscription_check: Option<(&'s ObjectTypeState, bool)>,
+    last_subscription_check: Option<(&'s ObjectTypeState<'s>, bool)>,
 }
 
 impl<'s> SupergraphRule<'s> for InvalidFieldSharingRule<'s> {
@@ -93,8 +93,8 @@ impl<'s> SupergraphVisitor<'s> for InvalidFieldSharingRule<'s> {
             return Ok(());
         }
 
-        let mut non_sharable_in: Vec<&String> = Vec::new();
-        let mut resolvable_in: Vec<&String> = Vec::new();
+        let mut non_sharable_in: Vec<&str> = Vec::new();
+        let mut resolvable_in: Vec<&str> = Vec::new();
 
         for (graph_id, field) in &field_state.by_graph {
             let field_is_shareable = field.shareable;
@@ -105,9 +105,7 @@ impl<'s> SupergraphVisitor<'s> for InvalidFieldSharingRule<'s> {
                 continue;
             }
 
-            if is_effective_override(cx, field.r#override.as_deref(), |id| {
-                field_state.by_graph.contains_key(id)
-            }) {
+            if is_effective_override(cx, field.r#override, |id| field_state.by_graph.contains_key(id)) {
                 // if a field tries to override some graph, check if it actually exists there.
                 // if it does, exclude it from invalid-field-sharing rule as override is effective.
                 continue;
@@ -126,7 +124,7 @@ impl<'s> SupergraphVisitor<'s> for InvalidFieldSharingRule<'s> {
         }
 
         // [Graph ID, Interface name]
-        let mut interface_object_field_in: Vec<(&String, &String)> = Vec::new();
+        let mut interface_object_field_in: Vec<(&str, &String)> = Vec::new();
 
         if !non_sharable_in.is_empty() {
             // Check if there are any @interfaceObject types that implement the field
@@ -138,7 +136,7 @@ impl<'s> SupergraphVisitor<'s> for InvalidFieldSharingRule<'s> {
                     continue;
                 }
 
-                let Some(interface_object_field_state) = interface_state.fields.get(&field_state.name) else {
+                let Some(interface_object_field_state) = interface_state.fields.get(field_state.name) else {
                     continue;
                 };
                 if interface_object_field_state.used_as_key {
@@ -240,9 +238,9 @@ impl<'s> SupergraphVisitor<'s> for InvalidFieldSharingRule<'s> {
 
         // detect a non-shareable field in a type with @interfaceObject and implementations of the interface
 
-        let mut non_sharable_in: Vec<&String> = Vec::new();
-        let mut resolvable_in: Vec<&String> = Vec::new();
-        let mut interface_object_field_in: Vec<&String> = Vec::new();
+        let mut non_sharable_in: Vec<&str> = Vec::new();
+        let mut resolvable_in: Vec<&str> = Vec::new();
+        let mut interface_object_field_in: Vec<&str> = Vec::new();
 
         for (graph_id, field) in &field_state.by_graph {
             let is_interface_object = interface_type_state

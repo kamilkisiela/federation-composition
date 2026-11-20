@@ -6,15 +6,18 @@
 use std::cell::RefCell;
 use std::fmt;
 
+use smallvec::{smallvec, SmallVec};
+
 use crate::utils::collections::{IndexMap, IndexSet};
 
 use crate::supergraph::state::SupergraphState;
 
 /// A `bigint` bitmask of contexts. Normalized (no trailing zero words) so `Eq`/`Hash` match
-/// bigint equality; `ContextMask::default()` is `0n`.
+/// bigint equality; `ContextMask::default()` is `0n`. The first 64 contexts fit inline, so masks
+/// of supergraphs with few contexts never allocate.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ContextMask {
-    words: Vec<u64>,
+    words: SmallVec<[u64; 1]>,
 }
 
 impl ContextMask {
@@ -25,7 +28,7 @@ impl ContextMask {
 
     /// `1n << BigInt(n)`.
     pub fn bit(n: usize) -> Self {
-        let mut words = vec![0u64; n / 64 + 1];
+        let mut words = smallvec![0u64; n / 64 + 1];
         words[n / 64] = 1u64 << (n % 64);
         ContextMask { words }
     }
@@ -37,35 +40,38 @@ impl ContextMask {
 
     /// `a | b`.
     pub fn or(&self, other: &ContextMask) -> ContextMask {
-        let len = self.words.len().max(other.words.len());
-        let words = (0..len)
-            .map(|i| self.words.get(i).copied().unwrap_or(0) | other.words.get(i).copied().unwrap_or(0))
-            .collect();
-        ContextMask { words }.normalized()
+        let mut out = self.clone();
+        out.or_assign(other);
+        out
     }
 
-    /// `a |= b`.
+    /// `a |= b`. Or-ing two normalized masks keeps the result normalized.
     pub fn or_assign(&mut self, other: &ContextMask) {
-        *self = self.or(other);
+        if self.words.len() < other.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        for (word, other) in self.words.iter_mut().zip(&other.words) {
+            *word |= other;
+        }
     }
 
     /// `a & b`.
+    #[cfg(test)]
     pub fn and(&self, other: &ContextMask) -> ContextMask {
-        let len = self.words.len().min(other.words.len());
-        let words = (0..len).map(|i| self.words[i] & other.words[i]).collect();
-        ContextMask { words }.normalized()
+        let mut words: SmallVec<[u64; 1]> = self.words.iter().zip(&other.words).map(|(a, b)| a & b).collect();
+        while words.last() == Some(&0) {
+            words.pop();
+        }
+        ContextMask { words }
     }
 
     /// `(self & required) === required`.
     pub fn contains_all(&self, required: &ContextMask) -> bool {
-        &self.and(required) == required
-    }
-
-    fn normalized(mut self) -> Self {
-        while self.words.last() == Some(&0) {
-            self.words.pop();
-        }
-        self
+        required
+            .words
+            .iter()
+            .enumerate()
+            .all(|(i, &req)| self.words.get(i).copied().unwrap_or(0) & req == req)
     }
 }
 
@@ -76,7 +82,7 @@ impl fmt::Display for ContextMask {
             return f.write_str("0");
         }
         // Repeated division by 10^18 over the little-endian words.
-        let mut words = self.words.clone();
+        let mut words = self.words.to_vec();
         let mut chunks: Vec<u64> = Vec::new();
         const BASE: u128 = 1_000_000_000_000_000_000;
         while !words.is_empty() {
@@ -113,7 +119,8 @@ pub struct ContextAwareType<'t> {
 /// merged graph and the subgraph graphs.
 #[derive(Debug, Default)]
 pub struct Contexts {
-    bit_by_context: RefCell<IndexMap<String, ContextMask>>,
+    /// The bit of each context is its index.
+    bit_by_context: RefCell<IndexSet<String>>,
     pub by_type_name: IndexMap<String, ContextMask>,
 }
 
@@ -167,14 +174,12 @@ impl Contexts {
 
     /// The bit assigned to a context; new contexts receive the next unused bit.
     fn bit_for(&self, context: &str) -> ContextMask {
-        if let Some(bit) = self.bit_by_context.borrow().get(context) {
-            return bit.clone();
-        }
-
         let mut bit_by_context = self.bit_by_context.borrow_mut();
-        let bit = ContextMask::bit(bit_by_context.len());
-        bit_by_context.insert(context.to_string(), bit.clone());
-        bit
+        let bit = match bit_by_context.get_index_of(context) {
+            Some(bit) => bit,
+            None => bit_by_context.insert_full(context.to_string()).0,
+        };
+        ContextMask::bit(bit)
     }
 
     fn add_mask(&mut self, type_name: &str, mask: ContextMask) {

@@ -19,13 +19,13 @@ pub fn directive_builder() -> DirectiveBuilder {
     DirectiveBuilder
 }
 
-impl TypeBuilder<Directive, DirectiveState> for DirectiveBuilder {
+impl<'a> TypeBuilder<'a, Directive, DirectiveState> for DirectiveBuilder {
     fn visit_subgraph_state(
         &mut self,
-        graph: &Graph,
+        graph: &'a Graph,
         state: &mut IndexMap<String, DirectiveState>,
-        directive_name: &str,
-        directive: &Directive,
+        directive_name: &'a str,
+        directive: &'a Directive,
     ) {
         // Because the visitor is called from leaf to root (it's using "leave"),
         // we can assume that @composeDirective was already visited and set the composed flag.
@@ -181,7 +181,7 @@ fn get_or_create_directive<'s>(
     get_or_insert_with(state, directive_name, || DirectiveState {
         name: directive_name.to_string(),
         locations: IndexSet::default(),
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         args: IndexMap::default(),
         repeatable: false,
         is_executable: false,
@@ -202,7 +202,7 @@ fn get_or_create_arg<'s>(
         inaccessible: false,
         tags: IndexSet::default(),
         default_value: None,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         ast: Ast { directives: vec![] },
     })
 }

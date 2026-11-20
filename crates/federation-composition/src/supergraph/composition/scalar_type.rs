@@ -21,13 +21,13 @@ pub fn scalar_type_builder() -> ScalarTypeBuilder {
     ScalarTypeBuilder
 }
 
-impl TypeBuilder<ScalarType, ScalarTypeState> for ScalarTypeBuilder {
+impl<'a> TypeBuilder<'a, ScalarType, ScalarTypeState> for ScalarTypeBuilder {
     fn visit_subgraph_state(
         &mut self,
-        graph: &Graph,
+        graph: &'a Graph,
         state: &mut IndexMap<String, ScalarTypeState>,
-        type_name: &str,
-        ty: &ScalarType,
+        type_name: &'a str,
+        ty: &'a ScalarType,
     ) {
         let scalar_type_state = get_or_create_scalar_type(state, type_name);
 
@@ -157,7 +157,7 @@ fn get_or_create_scalar_type<'s>(
         policies: vec![],
         scopes: vec![],
         cost: None,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         description: None,
         specified_by: None,
         ast: Ast { directives: vec![] },

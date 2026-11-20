@@ -19,13 +19,13 @@ pub fn union_type_builder() -> UnionTypeBuilder {
     UnionTypeBuilder
 }
 
-impl TypeBuilder<UnionType, UnionTypeState> for UnionTypeBuilder {
+impl<'a> TypeBuilder<'a, UnionType, UnionTypeState> for UnionTypeBuilder {
     fn visit_subgraph_state(
         &mut self,
-        graph: &Graph,
+        graph: &'a Graph,
         state: &mut IndexMap<String, UnionTypeState>,
-        type_name: &str,
-        ty: &UnionType,
+        type_name: &'a str,
+        ty: &'a UnionType,
     ) {
         let union_type_state = get_or_create_union_type(state, type_name);
 
@@ -145,7 +145,7 @@ fn get_or_create_union_type<'s>(
         contexts: IndexSet::default(),
         has_definition: false,
         description: None,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         ast: Ast { directives: vec![] },
     })
 }

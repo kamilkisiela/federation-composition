@@ -25,7 +25,7 @@ impl<'s> SupergraphVisitor<'s> for InputObjectValuesRule {
         cx: &mut SupergraphValidationContext,
         input_object_type_state: &'s InputObjectTypeState,
     ) -> JsResult<()> {
-        let mut fields_in_common: Vec<&String> = Vec::new();
+        let mut fields_in_common: Vec<&str> = Vec::new();
         let total = input_object_type_state.by_graph.len();
         for (field_name, field_state) in &input_object_type_state.fields {
             // If it's not used in all the subgraphs, it's missing in some of them

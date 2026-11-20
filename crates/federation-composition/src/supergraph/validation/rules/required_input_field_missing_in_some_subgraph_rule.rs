@@ -37,16 +37,16 @@ impl<'s> SupergraphVisitor<'s> for RequiredInputFieldMissingInSomeSubgraphRule {
                 return Ok(());
             }
 
-            let graphs_with_required_field: Vec<&String> = field_state
+            let graphs_with_required_field: Vec<&str> = field_state
                 .by_graph
                 .iter()
                 .filter(|(_, field)| field.r#type.ends_with('!'))
                 .map(|(graph, _)| graph)
                 .collect();
-            let graphs_without_field: Vec<&String> = input_object_state
+            let graphs_without_field: Vec<&str> = input_object_state
                 .by_graph
                 .keys()
-                .filter(|graph| !field_state.by_graph.contains_key(*graph))
+                .filter(|graph| !field_state.by_graph.contains_key(graph))
                 .collect();
             let required_in = format!(
                 "subgraph{} \"{}\"",

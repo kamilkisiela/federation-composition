@@ -3,49 +3,42 @@
 use std::borrow::Cow;
 use std::rc::Rc;
 
+use smallvec::SmallVec;
+
 use super::edge::{is_abstract_edge, EdgeId, EdgeResolvabilityResult};
-use super::errors::{LazyErrors, OneOrMany, SatisfiabilityError};
+use super::errors::{LazyError, LazyErrors};
 use super::graph::Graph;
-use super::helpers::{lazy, OverrideLabels};
+use super::helpers::OverrideLabels;
 use super::move_validator::MoveValidator;
 use super::moves::Move;
-use super::node::{GraphNameId, GraphNameSet, NodeTypeState};
+use super::node::{FieldName, GraphNameSet, NodeTypeState};
 use super::operation_path::OperationPath;
 use super::selection::Selection;
 use crate::utils::js::JsResult;
 use crate::utils::logger::Logger;
 
-/// `concatIfNotExistsString(list, item)`.
-/// PERF: generic so that it also takes interned graph names ([`GraphNameId`]).
-pub fn concat_if_not_exists_string<T, Q>(list: &[T], item: &Q) -> Vec<T>
-where
-    T: Clone + PartialEq<Q>,
-    Q: ?Sized + ToOwned<Owned = T>,
-{
-    let mut out = Vec::with_capacity(list.len() + 1);
-    out.extend_from_slice(list);
-    if !list.iter().any(|x| x == item) {
-        out.push(item.to_owned());
-    }
-    out
-}
-
 /// `concatIfNotExistsFields(list, item)`.
-pub fn concat_if_not_exists_fields(list: &[Rc<Selection>], item: &Rc<Selection>) -> Vec<Rc<Selection>> {
-    // PERF: sized for the pushed item, so pushing does not reallocate.
-    let mut out = Vec::with_capacity(list.len() + 1);
-    out.extend_from_slice(list);
+/// `visitedFields`: the key and `@requires` selections already used on the way.
+/// The selections are the moves' own, borrowed from the graph.
+pub type VisitedFields<'v, 's> = SmallVec<[&'v Selection<'s>; 4]>;
+
+/// `visitedEdges`.
+pub type VisitedEdges = SmallVec<[EdgeId; 8]>;
+
+pub fn concat_if_not_exists_fields<'v, 's>(
+    list: &[&'v Selection<'s>],
+    item: &'v Selection<'s>,
+) -> VisitedFields<'v, 's> {
+    let mut out = VisitedFields::from(list);
     if !list.iter().any(|f| f.equals(item)) {
-        out.push(item.clone());
+        out.push(item);
     }
     out
 }
 
 /// `visitedEdges.concat(edge)`.
-/// PERF: sized for the pushed edge (`to_vec()` then `push` reallocates).
-pub fn concat_edge(visited_edges: &[EdgeId], edge: EdgeId) -> Vec<EdgeId> {
-    let mut out = Vec::with_capacity(visited_edges.len() + 1);
-    out.extend_from_slice(visited_edges);
+pub fn concat_edge(visited_edges: &[EdgeId], edge: EdgeId) -> VisitedEdges {
+    let mut out = VisitedEdges::from(visited_edges);
     out.push(edge);
     out
 }
@@ -53,23 +46,19 @@ pub fn concat_edge(visited_edges: &[EdgeId], edge: EdgeId) -> Vec<EdgeId> {
 /// `PathFinderResult`.
 #[derive(Clone, Debug)]
 pub enum PathFinderResult<'s> {
-    Success {
-        paths: Vec<OperationPath>,
-    },
-    Failure {
-        errors: LazyErrors<'s, SatisfiabilityError>,
-    },
+    Success { paths: Vec<OperationPath> },
+    Failure { errors: LazyErrors<'s> },
 }
 
 /// An entry of the `queue` of `findIndirectPaths`: `[visitedGraphs, visitedFields, path]`.
-/// PERF: `Cow` so that the first entry borrows the caller's lists and path instead of copying them.
-pub type IndirectPathsQueueItem<'q> = (Cow<'q, [GraphNameId]>, Cow<'q, [Rc<Selection>]>, Cow<'q, OperationPath>);
+/// The first entry borrows the caller's path.
+pub type IndirectPathsQueueItem<'v, 's, 'q> = (GraphNameSet, VisitedFields<'v, 's>, Cow<'q, OperationPath>);
 
 /// `edge.move.keyFields` of an entity or abstract move (`None` for a field move).
-fn key_fields_of(r#move: &Move) -> Option<Rc<Selection>> {
+fn key_fields_of<'v, 's>(r#move: &'v Move<'s>) -> Option<&'v Selection<'s>> {
     match r#move {
-        Move::Entity(m) => Some(m.key_fields.clone()),
-        Move::Abstract(m) => m.key_fields.clone(),
+        Move::Entity(m) => Some(&m.key_fields),
+        Move::Abstract(m) => m.key_fields.as_deref(),
         Move::Field(_) => None,
     }
 }
@@ -97,10 +86,10 @@ impl<'s> PathFinder<'s> {
     pub fn find_direct_paths(
         &self,
         path: &OperationPath,
-        type_name: &str,
-        field_name: Option<&str>,
+        type_name: &'s str,
+        field_name: Option<FieldName<'s>>,
         visited_edges: &[EdgeId],
-        label_values: &OverrideLabels,
+        label_values: &OverrideLabels<'s>,
     ) -> JsResult<PathFinderResult<'s>> {
         let graph = &*self.graph;
         let mut next_paths: Vec<OperationPath> = Vec::new();
@@ -117,8 +106,8 @@ impl<'s> PathFinder<'s> {
             .group(|| format!("Direct paths to {} from: {}", id(), graph.node(tail)));
 
         let edges = match field_name {
-            Some(field_name) => graph.field_edges_of_head(tail, field_name)?,
-            None => graph.abstract_edges_of_head(tail)?,
+            Some(field_name) => graph.field_edges_of_head(tail, field_name),
+            None => graph.abstract_edges_of_head(tail),
         };
 
         self.logger.log(|| format!("Checking {} edges", edges.len()));
@@ -155,9 +144,14 @@ impl<'s> PathFinder<'s> {
 
             if let (Some(field_name), Move::Field(field_move)) = (field_name, &e.r#move) {
                 if field_move.field_name == field_name {
-                    let resolvable = self
-                        .move_validator
-                        .is_edge_resolvable(edge, path, &[], &[], &[], label_values)?;
+                    let resolvable = self.move_validator.is_edge_resolvable(
+                        edge,
+                        path,
+                        &[],
+                        &GraphNameSet::default(),
+                        &[],
+                        label_values,
+                    )?;
                     match resolvable {
                         EdgeResolvabilityResult::Failure { error } => {
                             errors.add(error);
@@ -194,18 +188,12 @@ impl<'s> PathFinder<'s> {
         let Some(field_name) = field_name else {
             if let Some(NodeTypeState::Interface(type_state)) = tail_node.type_state {
                 if type_state.has_interface_object {
-                    let type_state_in_graph = type_state.by_graph.get(&tail_node.graph_id);
+                    let type_state_in_graph = type_state.by_graph.get(tail_node.graph_id);
 
                     if type_state_in_graph.is_some_and(|g| g.is_interface_object) {
                         // no subgraph can be reached to resolve the implementation type of @interfaceObject type
-                        let (graph_name, tail_type_name) = (tail_node.graph_name.clone(), tail_node.type_name.clone());
                         let mut errors = LazyErrors::new();
-                        errors.add(Rc::new(lazy(move || {
-                            Ok(OneOrMany::One(SatisfiabilityError::for_no_implementation(
-                                &graph_name,
-                                &tail_type_name,
-                            )))
-                        })));
+                        errors.add(LazyError::NoImplementation(tail));
                         return Ok(PathFinderResult::Failure { errors });
                     }
                 }
@@ -216,78 +204,29 @@ impl<'s> PathFinder<'s> {
             return Ok(PathFinderResult::Success { paths: Vec::new() });
         };
 
-        // PERF: the TS adds two lazy errors here, the missing-field error and then the no-key
-        // errors. This path runs for most failed lookups and its errors are rarely evaluated, so
-        // one lazy error yields both, in the same order (`toArray()` flattens them the same way;
-        // the first never throws, so a throw from the second fails `toArray()` either way).
-        {
-            let finder = self.clone();
-            // PERF: the names are captured as interned ids rather than copies.
-            let (type_name, field_name) = (graph.names.intern(type_name), graph.names.intern(field_name));
-            errors.add(Rc::new(lazy(move || {
-                let graph = &*finder.graph;
-                let (type_name, field_name) = (&graph.names.get(type_name), &graph.names.get(field_name));
-                let tail_graph_name = &graph.node(tail).graph_name;
-                // In case of no errors, we know that there were no edges matching the field name.
-                let mut errors: Vec<SatisfiabilityError> = vec![SatisfiabilityError::for_missing_field(
-                    tail_graph_name,
-                    type_name,
-                    field_name,
-                )];
-                // find graphs with the same type and field name, but no @key defined
-                let type_nodes = graph.nodes_of(type_name, true)?;
-                for type_node in type_nodes {
-                    let edges = graph.field_edges_of_head(type_node, field_name)?;
-                    for edge in edges {
-                        let e = graph.edge(edge);
-                        let Move::Field(field_move) = &e.r#move else {
-                            continue;
-                        };
-                        if
-                        // edge.move.typeName === typeName &&
-                        field_move.field_name == *field_name && !finder.move_validator.is_external(edge) {
-                            let head = graph.node(e.head);
-                            let resolvable_keys = match head.type_state {
-                                Some(NodeTypeState::Object(type_state)) => type_state
-                                    .by_graph
-                                    .get(&head.graph_id)
-                                    .map(|g| g.keys.iter().filter(|key| key.resolvable).count())
-                                    .unwrap_or(0),
-                                _ => 0,
-                            };
-
-                            if resolvable_keys == 0 {
-                                errors.push(SatisfiabilityError::for_no_key(
-                                    tail_graph_name,
-                                    &graph.node(e.tail).graph_name,
-                                    type_name,
-                                    field_name,
-                                ));
-                            }
-                        }
-                    }
-                }
-
-                Ok(OneOrMany::Many(errors))
-            })));
-        }
+        // The missing field, then the subgraphs that have it but no @key (one lazy error each in TS).
+        errors.add(LazyError::MissingFieldOrNoKey {
+            tail,
+            type_name,
+            field_name,
+        });
 
         Ok(PathFinderResult::Failure { errors })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn find_field_indirectly(
-        &self,
+    fn find_field_indirectly<'v>(
+        &'v self,
         path: &OperationPath,
-        type_name: &str,
-        field_name: &str,
+        type_name: &'s str,
+        field_name: FieldName<'s>,
         visited_edges: &[EdgeId],
-        visited_graphs: &[GraphNameId],
-        visited_fields: &[Rc<Selection>],
-        label_values: &OverrideLabels,
-        errors: &mut LazyErrors<'s, SatisfiabilityError>,
+        visited_graphs: &GraphNameSet,
+        visited_fields: &[&'v Selection<'s>],
+        label_values: &OverrideLabels<'s>,
+        errors: &mut LazyErrors<'s>,
         final_paths: &mut Vec<OperationPath>,
-        queue: &mut Vec<IndirectPathsQueueItem<'_>>,
+        queue: &mut Vec<IndirectPathsQueueItem<'v, 's, '_>>,
         resolved_graphs: &mut GraphNameSet,
         edge: EdgeId,
     ) -> JsResult<()> {
@@ -302,7 +241,7 @@ impl<'s> PathFinder<'s> {
         let key_fields = key_fields_of(&e.r#move);
         let tail = graph.node(e.tail);
 
-        if resolved_graphs.contains(&tail.graph_name_id) {
+        if resolved_graphs.contains(tail.graph_name_id) {
             self.logger.group_end("Ignore: already resolved this graph");
             return Ok(());
         }
@@ -311,8 +250,8 @@ impl<'s> PathFinder<'s> {
         if let Some(NodeTypeState::Interface(type_state)) = tail.type_state {
             let field_in_edge = type_state
                 .fields
-                .get(field_name)
-                .and_then(|f| f.by_graph.get(&tail.graph_id));
+                .get(field_name.as_str())
+                .and_then(|f| f.by_graph.get(tail.graph_id));
 
             if field_in_edge.is_none() {
                 self.logger.group_end("Ignore edge: tail type does not have this field");
@@ -353,8 +292,8 @@ impl<'s> PathFinder<'s> {
                 self.logger
                     .group_end(|| format!("Adding to queue: {}", new_path.to_string(graph)));
                 queue.push((
-                    Cow::Owned(visited_graphs.to_vec()),
-                    Cow::Owned(visited_fields.to_vec()),
+                    visited_graphs.clone(),
+                    VisitedFields::from_slice(visited_fields),
                     Cow::Owned(new_path),
                 ));
                 return Ok(());
@@ -395,7 +334,7 @@ impl<'s> PathFinder<'s> {
                     .group_end(|| format!("Resolvable: {} with {} paths", graph.edge_to_string(edge), paths.len()));
 
                 final_paths.extend(paths);
-                resolved_graphs.push(new_path_tail_graph_name);
+                resolved_graphs.insert(new_path_tail_graph_name);
                 return Ok(());
             }
             PathFinderResult::Failure { errors: direct_errors } => {
@@ -403,17 +342,17 @@ impl<'s> PathFinder<'s> {
             }
         }
 
-        resolved_graphs.push(new_path_tail_graph_name);
+        resolved_graphs.insert(new_path_tail_graph_name);
 
         self.logger.log("Did not find direct paths");
         self.logger
             .group_end(|| format!("Adding to queue: {}", new_path.to_string(graph)));
         queue.push((
-            Cow::Owned(concat_if_not_exists_string(visited_graphs, &tail.graph_name_id)),
-            Cow::Owned(match &key_fields {
+            visited_graphs.with(tail.graph_name_id),
+            match &key_fields {
                 Some(key_fields) => concat_if_not_exists_fields(visited_fields, key_fields),
-                None => visited_fields.to_vec(),
-            }),
+                None => VisitedFields::from_slice(visited_fields),
+            },
             Cow::Owned(new_path),
         ));
 
@@ -421,15 +360,15 @@ impl<'s> PathFinder<'s> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn find_type_indirectly(
-        &self,
+    fn find_type_indirectly<'v>(
+        &'v self,
         path: &OperationPath,
-        type_name: &str,
-        visited_graphs: &[GraphNameId],
-        visited_fields: &[Rc<Selection>],
-        _label_values: &OverrideLabels,
+        type_name: &'s str,
+        visited_graphs: &GraphNameSet,
+        visited_fields: &[&'v Selection<'s>],
+        _label_values: &OverrideLabels<'s>,
         final_paths: &mut Vec<OperationPath>,
-        queue: &mut Vec<IndirectPathsQueueItem<'_>>,
+        queue: &mut Vec<IndirectPathsQueueItem<'v, 's, '_>>,
         resolved_graphs: &mut GraphNameSet,
         edge: EdgeId,
     ) {
@@ -443,7 +382,7 @@ impl<'s> PathFinder<'s> {
 
         let tail = graph.node(e.tail);
 
-        if resolved_graphs.contains(&tail.graph_name_id) {
+        if resolved_graphs.contains(tail.graph_name_id) {
             self.logger.group_end("Already resolved the graph");
             return;
         }
@@ -461,16 +400,16 @@ impl<'s> PathFinder<'s> {
 
         // If the target is the tail of this edge, we have found a path
         if tail.type_name == type_name {
-            resolved_graphs.push(tail.graph_name_id);
+            resolved_graphs.insert(tail.graph_name_id);
             final_paths.push(new_path);
         } else {
             // Otherwise, we need to continue searching for the target
             queue.push((
-                Cow::Owned(visited_graphs.to_vec()),
-                Cow::Owned(match &key_fields {
+                visited_graphs.clone(),
+                match &key_fields {
                     Some(key_fields) => concat_if_not_exists_fields(visited_fields, key_fields),
-                    None => visited_fields.to_vec(),
-                }),
+                    None => VisitedFields::from_slice(visited_fields),
+                },
                 Cow::Owned(new_path),
             ));
         }
@@ -478,15 +417,15 @@ impl<'s> PathFinder<'s> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn find_indirect_paths(
-        &self,
+    pub fn find_indirect_paths<'v>(
+        &'v self,
         path: &OperationPath,
-        type_name: &str,
-        field_name: Option<&str>,
+        type_name: &'s str,
+        field_name: Option<FieldName<'s>>,
         visited_edges: &[EdgeId],
-        visited_graphs: &[GraphNameId],
-        visited_fields: &[Rc<Selection>],
-        label_values: &OverrideLabels,
+        visited_graphs: &GraphNameSet,
+        visited_fields: &[&'v Selection<'s>],
+        label_values: &OverrideLabels<'s>,
     ) -> JsResult<PathFinderResult<'s>> {
         let graph = &*self.graph;
         let mut errors = LazyErrors::new();
@@ -501,9 +440,9 @@ impl<'s> PathFinder<'s> {
         self.logger
             .group(|| format!("Indirect paths to {} from: {}", id(), graph.node(tail)));
 
-        let mut queue: Vec<IndirectPathsQueueItem<'_>> = vec![(
-            Cow::Borrowed(visited_graphs),
-            Cow::Borrowed(visited_fields),
+        let mut queue: Vec<IndirectPathsQueueItem<'v, 's, '_>> = vec![(
+            visited_graphs.clone(),
+            VisitedFields::from_slice(visited_fields),
             Cow::Borrowed(path),
         )];
         let mut final_paths: Vec<OperationPath> = Vec::new();
@@ -511,18 +450,17 @@ impl<'s> PathFinder<'s> {
 
         while let Some((visited_graphs, visited_fields, path)) = queue.pop() {
             let tail = path.tail_or_root(graph);
-            let edges = graph.indirect_edges_of_head(tail)?;
-
             self.logger.log(|| format!("At path: {}", path.to_string(graph)));
-            self.logger.log(|| format!("Checking {} edges", edges.len()));
-            for (i, &edge) in edges.iter().enumerate() {
+            self.logger
+                .log(|| format!("Checking {} edges", graph.indirect_edges_of_head(tail).count()));
+            for (i, edge) in graph.indirect_edges_of_head(tail).enumerate() {
                 self.logger
                     .group(|| format!("Checking #{i} {}", graph.edge_to_string(edge)));
                 self.logger
                     .log(|| format!("Visited graphs: {}", graph.graph_names.join(&visited_graphs, ",")));
 
                 let e = graph.edge(edge);
-                let edge_tail_graph_name = &graph.node(e.tail).graph_name_id;
+                let edge_tail_graph_name = graph.node(e.tail).graph_name_id;
 
                 if visited_graphs.contains(edge_tail_graph_name) {
                     self.logger.group_end("Ignore: already visited graph");
@@ -534,7 +472,7 @@ impl<'s> PathFinder<'s> {
                     continue;
                 }
 
-                if *edge_tail_graph_name == source_graph_name && !is_abstract_edge(e) {
+                if edge_tail_graph_name == source_graph_name && !is_abstract_edge(e) {
                     // Prevent a situation where we are going back to the same graph
                     // The only exception is when we are moving to an abstract type
                     self.logger.group_end("Ignore: we are back to the same graph");
@@ -588,18 +526,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn concat_if_not_exists_string_keeps_order() {
-        let list = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(concat_if_not_exists_string(&list, "b"), list);
-        assert_eq!(concat_if_not_exists_string(&list, "c"), vec!["a", "b", "c"]);
-    }
-
-    #[test]
     fn concat_if_not_exists_fields_uses_equals() {
-        let a = Rc::new(Selection::new("User".into(), "id".into(), vec![]));
-        let same_source = Rc::new(Selection::new("User".into(), "id".into(), vec![]));
-        let other_type = Rc::new(Selection::new("Post".into(), "id".into(), vec![]));
-        let list = vec![a];
+        let a = Selection::new("User", "id", vec![]);
+        let same_source = Selection::new("User", "id", vec![]);
+        let other_type = Selection::new("Post", "id", vec![]);
+        let list = [&a];
         assert_eq!(concat_if_not_exists_fields(&list, &same_source).len(), 1);
         assert_eq!(concat_if_not_exists_fields(&list, &other_type).len(), 2);
     }

@@ -56,9 +56,9 @@ pub const PRE_SUPERGRAPH_RULES: [(&str, PreSupergraphRule); 3] = [
 /// The post-supergraph rules (`postSupergraphRules`, then `selectionDependentRules` if no
 /// error was reported) are `SupergraphRule` structs, built in list order with
 /// [`supergraph_rule`] and visited with `visit_supergraph_state`.
-pub fn validate_supergraph(
-    subgraph_states: SubgraphStates,
-    state: &mut SupergraphStateBuilder,
+pub fn validate_supergraph<'a>(
+    subgraph_states: &'a SubgraphStates,
+    state: &mut SupergraphStateBuilder<'a>,
     internal: Option<&InternalOptions>,
 ) -> JsResult<Vec<GraphQLError>> {
     let mut context = create_supergraph_validation_context(subgraph_states.clone());
@@ -79,7 +79,7 @@ pub fn validate_supergraph(
     }
 
     for subgraph_state in subgraph_states.values() {
-        state.visit_subgraph_state(subgraph_state.clone());
+        state.visit_subgraph_state(subgraph_state);
     }
 
     state.compose_supergraph_state()?;

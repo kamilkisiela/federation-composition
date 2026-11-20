@@ -1,9 +1,14 @@
 //! Port of `src/supergraph/validation/rules/satisfiablity/errors.ts`.
 
 use std::fmt;
-use std::rc::Rc;
 
-use super::helpers::Lazy;
+use smallvec::SmallVec;
+
+use super::edge::EdgeId;
+use super::graph::Graph;
+use super::move_validator::is_external;
+use super::moves::Move;
+use super::node::{FieldName, NodeId, NodeTypeState};
 use crate::utils::js::JsResult;
 
 /// `SatisfiabilityErrorKind`.
@@ -150,66 +155,167 @@ impl fmt::Display for SatisfiabilityError {
     }
 }
 
-/// The value of a lazy error: `T | T[]`.
-#[derive(Clone, Debug, PartialEq)]
-pub enum OneOrMany<T> {
-    One(T),
-    Many(Vec<T>),
-}
-
-/// A shared lazy error value: `Lazy<T | T[]>`.
+/// A satisfiability error that is only built if it is reported (`lazy(() => ...)` in TS).
 ///
-/// NOTE(port): the value is a `JsResult` because a TS lazy error factory can throw when it is
-/// evaluated (`findDirectPaths` calls `graph.nodesOf(typeName)` inside one); the throw reaches
-/// whoever evaluates it (`toArray()`, from `WalkTracker.listErrors()`).
-pub type LazyError<'a, T> = Rc<Lazy<'a, JsResult<OneOrMany<T>>>>;
-
-/// `LazyErrors<T>`: errors collected lazily and evaluated only when reported.
-#[derive(Clone, Debug)]
-pub struct LazyErrors<'a, T> {
-    lazy_error: Vec<LazyError<'a, T>>,
+/// NOTE(port): the TS keeps a memoized closure per error. Everything those closures read is in
+/// the merged graph: an edge error's names are its head's and tail's graph and type names and
+/// its move's names. So an error is the id of what it is about, built when the errors are
+/// listed; most are never listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LazyError<'s> {
+    /// `forKey(head graph, tail graph, head type, key fields)` of an entity or abstract edge.
+    Key(EdgeId),
+    /// `forRequire(head graph, type, field)` of a field edge.
+    Require(EdgeId),
+    /// `forExternal(head graph, type, field)` of a field edge.
+    External(EdgeId),
+    /// `forMissingField(tail graph, type, field)` of a field edge whose override is off.
+    OverriddenField(EdgeId),
+    /// `forRequiredContext(head graph, type, field)` of a field edge.
+    RequiredContext(EdgeId),
+    /// `forNoImplementation(graph, type)` of an `@interfaceObject` node.
+    NoImplementation(NodeId),
+    /// The two lazy errors `findDirectPaths` adds when no edge has the field: the missing field
+    /// from `tail`, then the subgraphs that have the field but no resolvable `@key`. The second
+    /// throws if the type has no node.
+    MissingFieldOrNoKey {
+        tail: NodeId,
+        type_name: &'s str,
+        field_name: FieldName<'s>,
+    },
 }
 
-impl<T> Default for LazyErrors<'_, T> {
-    fn default() -> Self {
-        LazyErrors { lazy_error: Vec::new() }
+impl<'s> LazyError<'s> {
+    /// Builds the error(s), appending them to `out`. `graph` is the merged graph the error was
+    /// found in.
+    fn build(self, graph: &Graph<'s>, out: &mut Vec<SatisfiabilityError>) -> JsResult<()> {
+        let field_error = |edge: EdgeId, of_tail: bool| {
+            let e = graph.edge(edge);
+            let m = e.r#move.as_field().expect("a field edge's error");
+            let graph_name = graph.node(if of_tail { e.tail } else { e.head }).graph_name;
+            (graph_name, m.type_name, m.field_name.as_str())
+        };
+        let error = match self {
+            LazyError::Key(edge) => {
+                let e = graph.edge(edge);
+                let (head, tail) = (graph.node(e.head), graph.node(e.tail));
+                let key_fields = match &e.r#move {
+                    Move::Entity(m) => m.key_fields.to_string(),
+                    Move::Abstract(m) => m.key_fields.as_ref().map(|k| k.to_string()).unwrap_or_default(),
+                    Move::Field(_) => unreachable!("a key error is about an entity or abstract edge"),
+                };
+                SatisfiabilityError::for_key(head.graph_name, tail.graph_name, head.type_name, &key_fields)
+            }
+            LazyError::Require(edge) => {
+                let (g, t, f) = field_error(edge, false);
+                SatisfiabilityError::for_require(g, t, f)
+            }
+            LazyError::External(edge) => {
+                let (g, t, f) = field_error(edge, false);
+                SatisfiabilityError::for_external(g, t, f)
+            }
+            LazyError::OverriddenField(edge) => {
+                let (g, t, f) = field_error(edge, true);
+                SatisfiabilityError::for_missing_field(g, t, f)
+            }
+            LazyError::RequiredContext(edge) => {
+                let (g, t, f) = field_error(edge, false);
+                SatisfiabilityError::for_required_context(g, t, f)
+            }
+            LazyError::NoImplementation(node) => {
+                let node = graph.node(node);
+                SatisfiabilityError::for_no_implementation(node.graph_name, node.type_name)
+            }
+            LazyError::MissingFieldOrNoKey {
+                tail,
+                type_name,
+                field_name,
+            } => return build_missing_field_or_no_key(graph, tail, type_name, field_name, out),
+        };
+        out.push(error);
+        Ok(())
     }
 }
 
-impl<'a, T: Clone> LazyErrors<'a, T> {
+/// [`LazyError::MissingFieldOrNoKey`].
+fn build_missing_field_or_no_key<'s>(
+    graph: &Graph<'s>,
+    tail: NodeId,
+    type_name: &'s str,
+    field_name: FieldName<'s>,
+    out: &mut Vec<SatisfiabilityError>,
+) -> JsResult<()> {
+    let tail_graph_name = graph.node(tail).graph_name;
+    // In case of no errors, we know that there were no edges matching the field name.
+    out.push(SatisfiabilityError::for_missing_field(
+        tail_graph_name,
+        type_name,
+        field_name.as_str(),
+    ));
+    // find graphs with the same type and field name, but no @key defined
+    for type_node in graph.nodes_of(type_name, true)? {
+        for edge in graph.field_edges_of_head(type_node, field_name) {
+            let e = graph.edge(edge);
+            let Move::Field(field_move) = &e.r#move else {
+                continue;
+            };
+            if
+            // edge.move.typeName === typeName &&
+            field_move.field_name != field_name || is_external(graph, edge) {
+                continue;
+            }
+
+            let head = graph.node(e.head);
+            let resolvable_keys = match head.type_state {
+                Some(NodeTypeState::Object(type_state)) => type_state
+                    .by_graph
+                    .get(head.graph_id)
+                    .map_or(0, |g| g.keys.iter().filter(|key| key.resolvable).count()),
+                _ => 0,
+            };
+
+            if resolvable_keys == 0 {
+                out.push(SatisfiabilityError::for_no_key(
+                    tail_graph_name,
+                    graph.node(e.tail).graph_name,
+                    type_name,
+                    field_name.as_str(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `LazyErrors<T>`: errors collected lazily and evaluated only when reported. Most results carry
+/// at most one, so one is stored inline.
+#[derive(Clone, Debug, Default)]
+pub struct LazyErrors<'s> {
+    lazy_error: SmallVec<[LazyError<'s>; 1]>,
+}
+
+impl<'s> LazyErrors<'s> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// `add(lazyError)` for a single lazy error (or list of errors).
-    pub fn add(&mut self, lazy_error: LazyError<'a, T>) -> &mut Self {
+    /// `add(lazyError)`.
+    pub fn add(&mut self, lazy_error: LazyError<'s>) -> &mut Self {
         self.lazy_error.push(lazy_error);
         self
     }
 
     /// `add(otherLazyErrors)`: appends the other collection's lazy errors.
-    /// PERF: takes the other collection, which no caller uses afterwards, so its `Rc`s move
-    /// instead of being cloned and dropped.
-    pub fn add_all(&mut self, other: LazyErrors<'a, T>) -> &mut Self {
+    pub fn add_all(&mut self, other: LazyErrors<'s>) -> &mut Self {
         self.lazy_error.extend(other.lazy_error);
         self
     }
 
-    // TS: used by `errors.ts` itself; the ported callers do not need it.
-    #[allow(dead_code)]
-    pub fn get_lazy_errors(&self) -> &[LazyError<'a, T>] {
-        &self.lazy_error
-    }
-
-    /// `toArray()`: evaluates every lazy error and flattens (`filter(isDefined)` has nothing to
-    /// remove: values are never `undefined`). Throws if a factory throws.
-    pub fn to_array(&self) -> JsResult<Vec<T>> {
+    /// `toArray()`: builds every error, in order. Throws if building one throws.
+    pub fn to_array(&self, merged_graph: &Graph<'s>) -> JsResult<Vec<SatisfiabilityError>> {
         let mut out = Vec::new();
         for e in &self.lazy_error {
-            match e.get()? {
-                OneOrMany::One(v) => out.push(v),
-                OneOrMany::Many(vs) => out.extend(vs),
-            }
+            e.build(merged_graph, &mut out)?;
         }
         Ok(out)
     }

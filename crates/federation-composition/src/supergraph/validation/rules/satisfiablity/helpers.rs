@@ -1,9 +1,5 @@
 //! Port of `src/supergraph/validation/rules/satisfiablity/helpers.ts`.
 
-use std::cell::RefCell;
-
-use crate::utils::collections::IndexMap;
-
 /// `occurrences(str, subString)`.
 /// NOTE(port): lengths are UTF-16 in JS; key fields are ASCII.
 pub fn occurrences(s: &str, sub_string: &str) -> usize {
@@ -14,8 +10,8 @@ pub fn occurrences(s: &str, sub_string: &str) -> usize {
 }
 
 /// JS truthiness of a `string | null | undefined` (`""` is falsy).
-pub fn is_truthy_str(value: &Option<String>) -> bool {
-    value.as_deref().is_some_and(|s| !s.is_empty())
+pub fn is_truthy_str<S: AsRef<str>>(value: &Option<S>) -> bool {
+    value.as_ref().is_some_and(|s| !s.as_ref().is_empty())
 }
 
 /// `scoreKeyFields(keyFields)`.
@@ -25,94 +21,37 @@ pub fn score_key_fields(key_fields: &str) -> usize {
     fields + inner_selection_sets
 }
 
-/// `Lazy<T>` / `lazy(factory)`: a memoized value computed on the first `get()`.
-///
-/// The factory may borrow data living for `'a` (e.g. the satisfiability graphs, which are
-/// `Rc`-shared). Share one `Lazy` between owners with `Rc<Lazy<..>>` (the TS shares the object).
-/// The `toString` caches of `Node`/`Edge`/moves/`OperationPath` are only used for logging and
-/// can be computed on demand instead.
-///
-/// PERF: the factory is stored inline as the struct's unsized tail (`Lazy<'a, T>` is the
-/// `dyn Fn` form), so `Rc::new(lazy(..))` coerced to `Rc<Lazy<..>>` is one allocation instead
-/// of two. Satisfiability creates many lazy errors that are never evaluated.
-pub struct LazyCell<T, F: ?Sized> {
-    value: RefCell<Option<T>>,
-    factory: F,
-}
-
-/// `Lazy<T>` with the factory type erased.
-pub type Lazy<'a, T> = LazyCell<T, dyn Fn() -> T + 'a>;
-
-/// `lazy(factory)`.
-pub fn lazy<T, F: Fn() -> T>(factory: F) -> LazyCell<T, F> {
-    LazyCell {
-        value: RefCell::new(None),
-        factory,
-    }
-}
-
-impl<T: Clone, F: ?Sized + Fn() -> T> LazyCell<T, F> {
-    pub fn get(&self) -> T {
-        if let Some(v) = self.value.borrow().as_ref() {
-            return v.clone();
-        }
-        let v = (self.factory)();
-        *self.value.borrow_mut() = Some(v.clone());
-        v
-    }
-
-    // TS: invalidates the `toString` caches, which the port computes on demand.
-    #[allow(dead_code)]
-    pub fn invalidate(&self) {
-        *self.value.borrow_mut() = None;
-    }
-}
-
-impl<T, F: ?Sized> std::fmt::Debug for LazyCell<T, F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Lazy")
-    }
-}
-
-/// `OverrideLabels`: label name to on/off.
-/// NOTE(port): a plain object in TS iterated with `for..in` in `matches`; labels are user
-/// strings that could be integer-like (ordering only affects iteration, not the result of
-/// `matches`).
+/// `OverrideLabels`: label name to on/off, in the order the labels were set. The labels are the
+/// supergraph state's strings. Most supergraphs have none, and an empty `Vec` does not allocate
+/// when cloned.
+/// NOTE(port): a plain object in TS; only lookups and `matches` read it, so order is unobservable.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OverrideLabels {
-    state: IndexMap<String, bool>,
+pub struct OverrideLabels<'s> {
+    state: Vec<(&'s str, bool)>,
 }
 
-impl OverrideLabels {
-    pub fn new(state: Option<IndexMap<String, bool>>) -> Self {
-        OverrideLabels {
-            state: state.unwrap_or_default(),
+impl<'s> OverrideLabels<'s> {
+    pub fn set(mut self, key: &'s str, value: bool) -> Self {
+        match self.state.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, v)) => *v = value,
+            None => self.state.push((key, value)),
         }
-    }
-
-    pub fn set(mut self, key: &str, value: bool) -> Self {
-        self.state.insert(key.to_string(), value);
         self
     }
 
     pub fn get(&self, key: &str) -> Option<bool> {
-        self.state.get(key).copied()
+        self.state.iter().find(|(k, _)| *k == key).map(|&(_, v)| v)
     }
 
     /// Every label set here has the same value in `other` (`undefined !== true/false`).
-    pub fn matches(&self, other: &OverrideLabels) -> bool {
-        self.state.iter().all(|(k, v)| other.state.get(k) == Some(v))
-    }
-
-    pub fn clone_labels(&self) -> OverrideLabels {
-        self.clone()
+    pub fn matches(&self, other: &OverrideLabels<'_>) -> bool {
+        self.state.iter().all(|&(k, v)| other.get(k) == Some(v))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
 
     #[test]
     fn occurrences_counts_non_overlapping() {
@@ -132,34 +71,21 @@ mod tests {
 
     #[test]
     fn truthy_strings() {
-        assert!(!is_truthy_str(&None));
+        assert!(!is_truthy_str::<&str>(&None));
         assert!(!is_truthy_str(&Some(String::new())));
-        assert!(is_truthy_str(&Some("a".into())));
+        assert!(is_truthy_str(&Some("a")));
     }
 
     #[test]
     fn override_labels_match_only_set_keys() {
-        let empty = OverrideLabels::new(None);
-        let on = OverrideLabels::new(None).set("feature", true);
-        let off = OverrideLabels::new(None).set("feature", false);
+        let empty = OverrideLabels::default();
+        let on = OverrideLabels::default().set("feature", true);
+        let off = OverrideLabels::default().set("feature", false);
         assert!(empty.matches(&on));
-        assert!(on.matches(&on.clone_labels().set("other", false)));
+        assert!(on.matches(&on.clone().set("other", false)));
         assert!(!on.matches(&off));
         assert!(!on.matches(&empty));
         assert_eq!(on.get("feature"), Some(true));
         assert_eq!(on.get("missing"), None);
-    }
-
-    #[test]
-    fn lazy_memoizes_until_invalidated() {
-        let calls = Cell::new(0);
-        let value = lazy(|| {
-            calls.set(calls.get() + 1);
-            calls.get()
-        });
-        assert_eq!(value.get(), 1);
-        assert_eq!(value.get(), 1);
-        value.invalidate();
-        assert_eq!(value.get(), 2);
     }
 }

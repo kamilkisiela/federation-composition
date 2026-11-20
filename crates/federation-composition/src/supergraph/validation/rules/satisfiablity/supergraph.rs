@@ -8,7 +8,7 @@ use super::constants::GraphId;
 use super::contexts::Contexts;
 use super::graph::{Graph, TypesBySubgraph};
 use super::move_validator::MoveValidator;
-use super::node::GraphNames;
+use super::node::{FieldNames, GraphNames};
 use super::operation_path::Step;
 use super::selection::SelectionResolver;
 use super::walker::{WalkMethod, WalkTracker, Walker};
@@ -29,7 +29,8 @@ impl<'s> Supergraph<'s> {
     /// Builds every graph (throws on inconsistent state).
     pub fn new(supergraph_state: &'s SupergraphState) -> JsResult<Self> {
         let logger = Logger::new("Supergraph", &mut LoggerContext::new());
-        let selection_resolver = Rc::new(SelectionResolver::new(supergraph_state));
+        let field_names = Rc::new(FieldNames::default());
+        let selection_resolver = Rc::new(SelectionResolver::new(supergraph_state, field_names.clone()));
         // Contexts are only ever resolved on the merged graph,
         // the supergraph graph does not need to know about them.
         let contexts = if supergraph_state.specs.context {
@@ -41,34 +42,37 @@ impl<'s> Supergraph<'s> {
         let mut supergraph = Graph::new(
             &logger,
             GraphId::Supergraph,
-            "supergraph".to_string(),
+            "supergraph",
             supergraph_state,
             selection_resolver.clone(),
             true,
             None,
             graph_names.clone(),
+            field_names.clone(),
         );
         let mut merged_graph = Graph::new(
             &logger,
             GraphId::MergedGraph,
-            "merged".to_string(),
+            "merged",
             supergraph_state,
             selection_resolver.clone(),
             false,
             contexts.clone(),
             graph_names.clone(),
+            field_names.clone(),
         );
         let types_by_subgraph = TypesBySubgraph::new(supergraph_state);
         for (id, subgraph_state) in &supergraph_state.subgraphs {
             let mut graph = Graph::new(
                 &logger,
-                GraphId::Subgraph(id.clone()),
-                subgraph_state.graph.name.clone(),
+                GraphId::Subgraph(id),
+                &subgraph_state.graph.name,
                 supergraph_state,
                 selection_resolver.clone(),
                 false,
                 contexts.clone(),
                 graph_names.clone(),
+                field_names.clone(),
             );
             let types = types_by_subgraph.of(id);
             graph
@@ -80,8 +84,6 @@ impl<'s> Supergraph<'s> {
 
         merged_graph.join_subgraphs()?;
         merged_graph.add_overridden_fields()?;
-        // PERF: the merged graph is complete.
-        merged_graph.enable_edge_caches();
 
         supergraph
             .add_from_roots()?
@@ -104,9 +106,7 @@ impl<'s> Supergraph<'s> {
         &self.supergraph
     }
 
-    /// The merged graph (resolves the edges of `WalkTracker::paths`).
-    // TS: only `validateOperation` reads it.
-    #[allow(dead_code)]
+    /// The merged graph (resolves the edges of `WalkTracker::paths` and their errors).
     pub fn merged_graph(&self) -> &Rc<Graph<'s>> {
         &self.merged_graph
     }
@@ -124,7 +124,7 @@ impl<'s> Supergraph<'s> {
 
     // TS: defined here and never called in `src/` either.
     #[allow(dead_code)]
-    pub fn validate_operation(&self, operation: OperationType, steps: &[Step]) -> JsResult<WalkTracker<'s>> {
+    pub fn validate_operation(&self, operation: OperationType, steps: &[Step<'_>]) -> JsResult<WalkTracker<'s>> {
         Walker::new(
             &self.logger,
             self.move_requirement_checker.clone(),

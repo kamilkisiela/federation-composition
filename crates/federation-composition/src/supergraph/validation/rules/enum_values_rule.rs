@@ -22,7 +22,7 @@ impl<'s> SupergraphRule<'s> for EnumValuesRule {
 impl<'s> SupergraphVisitor<'s> for EnumValuesRule {
     fn enum_type(&mut self, cx: &mut SupergraphValidationContext, enum_type_state: &'s EnumTypeState) -> JsResult<()> {
         if enum_type_state.referenced_by_input_type && enum_type_state.referenced_by_output_type {
-            let mut missing_values: Vec<&String> = Vec::new();
+            let mut missing_values: Vec<&str> = Vec::new();
             let total = enum_type_state.by_graph.len();
 
             for (value_name, value_state) in &enum_type_state.values {
@@ -64,7 +64,7 @@ impl<'s> SupergraphVisitor<'s> for EnumValuesRule {
                     enum_type_state
                         .by_graph
                         .keys()
-                        .filter(|key| !value_state.by_graph.contains_key(*key)),
+                        .filter(|key| !value_state.by_graph.contains_key(key)),
                 )?;
 
                 let msg = [
@@ -92,7 +92,7 @@ impl<'s> SupergraphVisitor<'s> for EnumValuesRule {
                 cx.report_error(GraphQLError::with_code(msg, "ENUM_VALUE_MISMATCH"));
             }
         } else if enum_type_state.referenced_by_input_type {
-            let mut values_in_common: Vec<&String> = Vec::new();
+            let mut values_in_common: Vec<&str> = Vec::new();
             let total = enum_type_state.by_graph.len();
 
             for (value_name, value_state) in &enum_type_state.values {

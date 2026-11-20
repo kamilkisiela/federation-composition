@@ -35,8 +35,8 @@ impl<'s> SupergraphVisitor<'s> for ExternalTypeMismatchRule {
             return Ok(());
         }
 
-        let mut group_by_type: IndexMap<&str, Vec<&String>> = IndexMap::default();
-        let mut graphs_with_equal_type: Vec<&String> = Vec::new();
+        let mut group_by_type: IndexMap<&str, Vec<&str>> = IndexMap::default();
+        let mut graphs_with_equal_type: Vec<&str> = Vec::new();
 
         for (graph_id, field) in &field_state.by_graph {
             let graph_version = cx
@@ -66,7 +66,7 @@ impl<'s> SupergraphVisitor<'s> for ExternalTypeMismatchRule {
                 continue;
             }
 
-            group_by_type.entry(field.r#type.as_str()).or_default().push(graph_id);
+            group_by_type.entry(field.r#type).or_default().push(graph_id);
         }
 
         if !group_by_type.is_empty() && !graphs_with_equal_type.is_empty() {

@@ -58,12 +58,12 @@ pub struct SupergraphSpecs {
     pub policy: bool,
 }
 
-/// `SupergraphState`.
+/// `SupergraphState`. `'a` is the lifetime of the subgraph states it borrows from.
 #[derive(Clone, Debug, Default)]
-pub struct SupergraphState {
+pub struct SupergraphState<'a> {
     pub subgraphs: SubgraphStates,
     pub scalar_types: IndexMap<String, ScalarTypeState>,
-    pub object_types: IndexMap<String, ObjectTypeState>,
+    pub object_types: IndexMap<String, ObjectTypeState<'a>>,
     pub interface_types: IndexMap<String, InterfaceTypeState>,
     pub union_types: IndexMap<String, UnionTypeState>,
     pub enum_types: IndexMap<String, EnumTypeState>,
@@ -75,8 +75,8 @@ pub struct SupergraphState {
 
 /// `SupergraphStateBuilder = ReturnType<typeof createSupergraphStateBuilder>`.
 #[derive(Debug)]
-pub struct SupergraphStateBuilder {
-    state: SupergraphState,
+pub struct SupergraphStateBuilder<'a> {
+    state: SupergraphState<'a>,
     directive: DirectiveBuilder,
     scalar_type: ScalarTypeBuilder,
     enum_type: EnumTypeBuilder,
@@ -90,7 +90,7 @@ pub struct SupergraphStateBuilder {
 }
 
 /// `createSupergraphStateBuilder()`.
-pub fn create_supergraph_state_builder() -> SupergraphStateBuilder {
+pub fn create_supergraph_state_builder<'a>() -> SupergraphStateBuilder<'a> {
     SupergraphStateBuilder {
         state: SupergraphState {
             subgraphs: IndexMap::default(),
@@ -130,10 +130,10 @@ pub fn create_supergraph_state_builder() -> SupergraphStateBuilder {
     }
 }
 
-impl SupergraphStateBuilder {
+impl<'a> SupergraphStateBuilder<'a> {
     /// `addSubgraph(subgraph)`. Throws `Graph with ID "X" already exists`.
     pub fn add_subgraph(&mut self, subgraph: Rc<SubgraphState>) -> JsResult<()> {
-        if self.state.subgraphs.contains_key(&subgraph.graph.id) {
+        if self.state.subgraphs.contains_key(&*subgraph.graph.id) {
             return Err(JsError::error(format!(
                 "Graph with ID \"{}\" already exists",
                 subgraph.graph.id
@@ -141,8 +141,8 @@ impl SupergraphStateBuilder {
         }
 
         self.graph_name_to_id_map
-            .insert(subgraph.graph.name.clone(), subgraph.graph.id.clone());
-        self.state.subgraphs.insert(subgraph.graph.id.clone(), subgraph);
+            .insert(subgraph.graph.name.clone(), subgraph.graph.id.to_string());
+        self.state.subgraphs.insert(subgraph.graph.id.to_string(), subgraph);
         Ok(())
     }
 
@@ -170,9 +170,9 @@ impl SupergraphStateBuilder {
         Ok(())
     }
 
-    pub fn visit_subgraph_state(&mut self, subgraph_state: Rc<SubgraphState>) {
+    pub fn visit_subgraph_state(&mut self, subgraph_state: &'a Rc<SubgraphState>) {
         self.subgraph_states
-            .insert(subgraph_state.graph.id.clone(), subgraph_state.clone());
+            .insert(subgraph_state.graph.id.to_string(), subgraph_state.clone());
         for link in &subgraph_state.links {
             self.state.links.push(link_with_graph(link, &subgraph_state.graph.id));
         }
@@ -292,14 +292,14 @@ impl SupergraphStateBuilder {
         }
     }
 
-    pub fn get_supergraph_state(&self) -> &SupergraphState {
+    pub fn get_supergraph_state(&self) -> &SupergraphState<'a> {
         &self.state
     }
 
     /// NOTE(port): not in the TS, where `getSupergraphState()` hands out the mutable object.
     /// `validate_supergraph` uses it to apply the writes the validation rules make to the
     /// state while visiting it (see `SupergraphValidationContext::pending_state_updates`).
-    pub fn get_supergraph_state_mut(&mut self) -> &mut SupergraphState {
+    pub fn get_supergraph_state_mut(&mut self) -> &mut SupergraphState<'a> {
         &mut self.state
     }
 
@@ -399,7 +399,7 @@ impl SupergraphStateBuilder {
                 .values()
                 .map(|subgraph| JoinGraphAst {
                     name: subgraph.graph.name.clone(),
-                    enum_value: subgraph.graph.id.clone(),
+                    enum_value: subgraph.graph.id.to_string(),
                     url: Some(subgraph.graph.url.clone().unwrap_or_default()),
                 })
                 .collect::<Vec<_>>(),
@@ -587,7 +587,7 @@ fn visit_type_state(state: &mut SupergraphState, object_type_name: &str) -> JsRe
                 .by_graph
                 .get_index(graph_index)
                 .expect("graph index in range");
-            let graph_id = graph_id.clone();
+            let graph_id = graph_id.to_string();
 
             if let Some(requires) = field_state_in_graph.requires.clone().filter(|r| !r.is_empty()) {
                 let keys: Vec<String> = type_state
@@ -866,7 +866,7 @@ mod tests {
             identity: "https://specs.apollo.dev/link".into(),
             imports: vec![],
         });
-        builder.visit_subgraph_state(Rc::new(a));
+        builder.visit_subgraph_state(Box::leak(Box::new(Rc::new(a))));
 
         let state = builder.get_supergraph_state();
         assert!(state.specs.tag);

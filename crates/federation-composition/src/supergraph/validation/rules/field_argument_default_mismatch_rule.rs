@@ -33,7 +33,7 @@ impl<'s> SupergraphVisitor<'s> for FieldArgumentDefaultMismatchRule {
             return Ok(());
         }
 
-        let mut default_value_to_graphs: IndexMap<&str, Vec<&String>> = IndexMap::default();
+        let mut default_value_to_graphs: IndexMap<&str, Vec<&str>> = IndexMap::default();
 
         for (graph_name, arg) in &arg_state.by_graph {
             if let Some(default_value) = &arg.default_value {

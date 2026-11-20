@@ -11,7 +11,7 @@ use graphql_core::GraphQLError;
 /// `InterfaceFieldNoImplementationRule(context, supergraph)`.
 /// Visitor callbacks: `ObjectType`.
 pub struct InterfaceFieldNoImplementationRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
 }
 
 impl<'s> SupergraphRule<'s> for InterfaceFieldNoImplementationRule<'s> {
@@ -71,7 +71,7 @@ impl<'s> SupergraphVisitor<'s> for InterfaceFieldNoImplementationRule<'s> {
                 }
 
                 // TODO: detect if a field is missing in a non-entity object type definition
-                if object_type_state.fields.contains_key(field_name) && object_type_state.is_entity {
+                if object_type_state.fields.contains_key(field_name.as_str()) && object_type_state.is_entity {
                     continue;
                 }
 
@@ -82,7 +82,7 @@ impl<'s> SupergraphVisitor<'s> for InterfaceFieldNoImplementationRule<'s> {
                         continue;
                     }
 
-                    let object_field_state = object_type_state.fields.get(field_name);
+                    let object_field_state = object_type_state.fields.get(field_name.as_str());
 
                     // if not, make sure it implements the field
                     if object_field_state.is_none() {

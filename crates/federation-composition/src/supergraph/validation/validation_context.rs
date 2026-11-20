@@ -56,7 +56,7 @@ impl SupergraphStateUpdate {
                 if let Some(list_size) = state
                     .object_types
                     .get_mut(&type_name)
-                    .and_then(|t| t.fields.get_mut(&field_name))
+                    .and_then(|t| t.fields.get_mut(field_name.as_str()))
                     .and_then(|f| f.list_size.as_mut())
                 {
                     list_size.slicing_arguments = Some(slicing_arguments);
@@ -70,7 +70,7 @@ impl SupergraphStateUpdate {
                 if let Some(list_size) = state
                     .interface_types
                     .get_mut(&type_name)
-                    .and_then(|t| t.fields.get_mut(&field_name))
+                    .and_then(|t| t.fields.get_mut(field_name.as_str()))
                     .and_then(|f| f.list_size.as_mut())
                 {
                     list_size.slicing_arguments = Some(slicing_arguments);
@@ -80,7 +80,7 @@ impl SupergraphStateUpdate {
                 if let Some(list_size) = state
                     .interface_types
                     .get_mut(&type_name)
-                    .and_then(|t| t.fields.get_mut(&field_name))
+                    .and_then(|t| t.fields.get_mut(field_name.as_str()))
                     .and_then(|f| f.list_size.as_mut())
                 {
                     list_size.print_require_one_slicing_argument = true;
@@ -116,8 +116,8 @@ impl SupergraphValidationContext {
     }
 
     /// `ids.map(context.graphIdToName)`: throws at the first unknown id.
-    pub fn graph_ids_to_names<'i>(&self, ids: impl IntoIterator<Item = &'i String>) -> JsResult<Vec<String>> {
-        ids.into_iter().map(|id| self.graph_id_to_name(id)).collect()
+    pub fn graph_ids_to_names(&self, ids: impl IntoIterator<Item = impl AsRef<str>>) -> JsResult<Vec<String>> {
+        ids.into_iter().map(|id| self.graph_id_to_name(id.as_ref())).collect()
     }
 
     /// `graphNameToId(name)`:`subgraphNameToIdMap[name] ?? null`.

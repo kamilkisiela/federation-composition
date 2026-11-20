@@ -22,13 +22,13 @@ pub fn input_object_type_builder() -> InputObjectTypeBuilder {
     InputObjectTypeBuilder
 }
 
-impl TypeBuilder<InputObjectType, InputObjectTypeState> for InputObjectTypeBuilder {
+impl<'a> TypeBuilder<'a, InputObjectType, InputObjectTypeState> for InputObjectTypeBuilder {
     fn visit_subgraph_state(
         &mut self,
-        graph: &Graph,
+        graph: &'a Graph,
         state: &mut IndexMap<String, InputObjectTypeState>,
-        type_name: &str,
-        ty: &InputObjectType,
+        type_name: &'a str,
+        ty: &'a InputObjectType,
     ) {
         let input_object_type_state = get_or_create_input_object_type(state, type_name);
 
@@ -166,7 +166,7 @@ impl TypeBuilder<InputObjectType, InputObjectTypeState> for InputObjectTypeBuild
                             .by_graph
                             .iter()
                             .map(|(graph, field_by_graph)| JoinFieldAst {
-                                graph: Some(graph.clone()),
+                                graph: Some(graph.to_string()),
                                 r#type: Some(field_by_graph.r#type.clone()),
                                 ..Default::default()
                             })
@@ -192,7 +192,7 @@ impl TypeBuilder<InputObjectType, InputObjectTypeState> for InputObjectTypeBuild
                     .by_graph
                     .keys()
                     .map(|graph| JoinTypeAst {
-                        graph: graph.clone(),
+                        graph: graph.to_string(),
                         ..Default::default()
                     })
                     .collect(),
@@ -260,7 +260,7 @@ fn get_or_create_input_object_type<'s>(
         inaccessible: false,
         description: None,
         is_one_of: None,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         fields: IndexMap::default(),
         ast: Ast { directives: vec![] },
     })
@@ -283,7 +283,7 @@ fn get_or_create_field<'s>(
             default_value: None,
             description: None,
             deprecated: None,
-            by_graph: IndexMap::default(),
+            by_graph: MapByGraph::default(),
             ast: Ast { directives: vec![] },
         }
     })

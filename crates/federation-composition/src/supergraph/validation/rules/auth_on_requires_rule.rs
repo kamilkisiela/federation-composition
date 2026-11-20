@@ -20,7 +20,7 @@ use graphql_core::{Field, InlineFragment, SelectionSet};
 /// transitive fields accessed via the `@requires` selection set are properly protected.
 /// Visitor callbacks: `ObjectTypeField`.
 pub struct AuthOnRequiresRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
 }
 
 impl<'s> SupergraphRule<'s> for AuthOnRequiresRule<'s> {
@@ -80,7 +80,7 @@ pub type Coordinate = String;
 /// `ObjectTypeState | InterfaceTypeState | UnionTypeState`.
 #[derive(Clone, Copy, Debug)]
 pub enum RequiresCurrentType<'s> {
-    Object(&'s ObjectTypeState),
+    Object(&'s ObjectTypeState<'s>),
     Interface(&'s InterfaceTypeState),
     Union(&'s UnionTypeState),
 }
@@ -180,7 +180,7 @@ struct FieldDetails {
 /// unionTypes`.
 #[derive(Clone, Copy)]
 enum OutputType<'s> {
-    Object(&'s ObjectTypeState),
+    Object(&'s ObjectTypeState<'s>),
     Interface(&'s InterfaceTypeState),
     Enum(&'s EnumTypeState),
     Scalar(&'s ScalarTypeState),
@@ -206,14 +206,14 @@ fn ensure_access_to_field(
 
     // `currentType.fields.get(fieldNode.name.value)`
     let found = match current_type {
-        RequiresCurrentType::Object(t) => t.fields.get(field_name).map(|f| FieldDetails {
-            r#type: f.r#type.clone(),
+        RequiresCurrentType::Object(t) => t.fields.get(field_name.as_str()).map(|f| FieldDetails {
+            r#type: f.r#type.to_string(),
             scopes: f.scopes.clone(),
             policies: f.policies.clone(),
             authenticated: f.authenticated,
         }),
         RequiresCurrentType::Interface(t) => t.fields.get(field_name).map(|f| FieldDetails {
-            r#type: f.r#type.clone(),
+            r#type: f.r#type.to_string(),
             scopes: f.scopes.clone(),
             policies: f.policies.clone(),
             authenticated: f.authenticated,

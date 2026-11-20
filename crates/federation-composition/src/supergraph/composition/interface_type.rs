@@ -50,7 +50,7 @@ impl InterfaceTypeBuilder {
         }
         for field in interface_type.fields.values_mut() {
             for implementor in &implementors {
-                let Some(implementor_field) = implementor.fields.get(&field.name) else {
+                let Some(implementor_field) = implementor.fields.get(field.name.as_str()) else {
                     continue;
                 };
                 // When a field comes from an interface object, we need to look for the implementation
@@ -66,13 +66,13 @@ impl InterfaceTypeBuilder {
     }
 }
 
-impl TypeBuilder<InterfaceType, InterfaceTypeState> for InterfaceTypeBuilder {
+impl<'a> TypeBuilder<'a, InterfaceType, InterfaceTypeState> for InterfaceTypeBuilder {
     fn visit_subgraph_state(
         &mut self,
-        graph: &Graph,
+        graph: &'a Graph,
         state: &mut IndexMap<String, InterfaceTypeState>,
-        type_name: &str,
-        ty: &InterfaceType,
+        type_name: &'a str,
+        ty: &'a InterfaceType,
     ) {
         let interface_type_state = get_or_create_interface_type(state, type_name);
 
@@ -286,7 +286,7 @@ impl TypeBuilder<InterfaceType, InterfaceTypeState> for InterfaceTypeBuilder {
             if field.by_graph.len() != interface_type.by_graph.len() || has_join_field_metadata {
                 for (graph_id, meta) in &field.by_graph {
                     join_fields.push(JoinFieldAst {
-                        graph: Some(graph_id.clone()),
+                        graph: Some(graph_id.to_string()),
                         r#type: if meta.r#type == field.r#type {
                             None
                         } else {
@@ -385,7 +385,7 @@ impl TypeBuilder<InterfaceType, InterfaceTypeState> for InterfaceTypeBuilder {
             if !meta.keys.is_empty() && graph_federation_version(graphs, graph_id) != FederationVersion::V1_0 {
                 for key in &meta.keys {
                     join_types.push(JoinTypeAst {
-                        graph: graph_id.clone(),
+                        graph: graph_id.to_string(),
                         key: Some(key.fields.clone()),
                         extension: Some(meta.extension),
                         is_interface_object: Some(meta.is_interface_object),
@@ -396,7 +396,7 @@ impl TypeBuilder<InterfaceType, InterfaceTypeState> for InterfaceTypeBuilder {
             }
 
             join_types.push(JoinTypeAst {
-                graph: graph_id.clone(),
+                graph: graph_id.to_string(),
                 ..Default::default()
             });
         }
@@ -406,7 +406,7 @@ impl TypeBuilder<InterfaceType, InterfaceTypeState> for InterfaceTypeBuilder {
             for (graph_id, meta) in &interface_type.by_graph {
                 for iface in &meta.interfaces {
                     implements.push(JoinImplementsAst {
-                        graph: graph_id.clone(),
+                        graph: graph_id.to_string(),
                         interface: iface.clone(),
                     });
                 }
@@ -436,8 +436,8 @@ impl TypeBuilder<InterfaceType, InterfaceTypeState> for InterfaceTypeBuilder {
 }
 
 /// JS truthiness of a `string | null` value.
-pub(crate) fn truthy(value: &Option<String>) -> bool {
-    value.as_deref().is_some_and(|v| !v.is_empty())
+pub(crate) fn truthy<S: AsRef<str>>(value: &Option<S>) -> bool {
+    value.as_ref().is_some_and(|v| !v.as_ref().is_empty())
 }
 
 /// `graphs.get(graphId)!.federation.version`.
@@ -594,7 +594,7 @@ fn get_or_create_interface_type<'s>(
         has_definition: false,
         has_interface_object: false,
         is_entity: false,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         fields: IndexMap::default(),
         interfaces: IndexSet::default(),
         implemented_by: IndexSet::default(),
@@ -623,7 +623,7 @@ fn get_or_create_interface_field<'s>(
             list_size: None,
             deprecated: None,
             description: None,
-            by_graph: IndexMap::default(),
+            by_graph: MapByGraph::default(),
             args: IndexMap::default(),
             ast: Ast::default(),
         }
@@ -646,7 +646,7 @@ fn get_or_create_arg<'s>(
         cost: None,
         description: None,
         deprecated: None,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         ast: Ast::default(),
     })
 }
@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn truthy_matches_js_strings() {
-        assert!(!truthy(&None));
+        assert!(!truthy::<&str>(&None));
         assert!(!truthy(&Some(String::new())));
         assert!(truthy(&Some("a".to_string())));
     }

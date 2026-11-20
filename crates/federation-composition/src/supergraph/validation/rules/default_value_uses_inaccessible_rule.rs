@@ -14,7 +14,7 @@ use graphql_core::GraphQLError;
 /// `DefaultValueUsesInaccessibleRule(context, supergraph)`.
 /// Visitor callbacks: `InputObjectTypeField`, `ObjectTypeFieldArg`.
 pub struct DefaultValueUsesInaccessibleRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
 }
 
 impl<'s> SupergraphRule<'s> for DefaultValueUsesInaccessibleRule<'s> {

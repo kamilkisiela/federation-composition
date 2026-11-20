@@ -7,7 +7,9 @@ use super::ast::{
     create_object_type_node, CostAst, FieldArgumentAst, FieldAst, JoinAst, JoinFieldAst, JoinFieldContextArgumentAst,
     JoinImplementsAst, JoinTypeAst, ObjectTypeAst,
 };
-use super::common::{convert_to_const, get_or_insert_with, ComposeHelpers, Graph, Key, MapByGraph, TypeBuilder};
+use super::common::{
+    convert_to_const, get_or_insert_borrowed, get_or_insert_with, ComposeHelpers, Graph, Key, MapByGraph, TypeBuilder,
+};
 use super::interface_type::{
     graph_federation_version, list_size_ast, merge_list_size, truthy, InterfaceTypeFieldState, InterfaceTypeState,
 };
@@ -104,7 +106,7 @@ impl ObjectTypeBuilder {
 
                 // Merge auth directives from interface object field with the object field
                 // Check REF_AUTH_INTERFACE_OBJECT_SHAREABLE in tests
-                if let Some(field_state) = object_type.fields.get_mut(interface_field_name) {
+                if let Some(field_state) = object_type.fields.get_mut(interface_field_name.as_str()) {
                     field_state.scopes = merge_scope_policies(&field_state.scopes, &interface_field.scopes);
                     field_state.policies = merge_scope_policies(&field_state.policies, &interface_field.policies);
                     if interface_field.authenticated {
@@ -128,13 +130,13 @@ fn last_index_of_bang(value: &str) -> i64 {
     value.rfind('!').map_or(-1, |i| i as i64)
 }
 
-impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
+impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder {
     fn visit_subgraph_state(
         &mut self,
-        graph: &Graph,
-        state: &mut IndexMap<String, ObjectTypeState>,
-        type_name: &str,
-        ty: &ObjectType,
+        graph: &'a Graph,
+        state: &mut IndexMap<String, ObjectTypeState<'a>>,
+        type_name: &'a str,
+        ty: &'a ObjectType,
     ) {
         let object_type_state = get_or_create_object_type(state, type_name);
 
@@ -200,14 +202,14 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                 extension: ty.extension,
                 extension_type: ty.extension_type,
                 external: ty.external,
-                keys: ty.keys.clone(),
+                keys: &ty.keys,
                 inaccessible: ty.inaccessible,
                 shareable: ty.shareable,
-                interfaces: ty.interfaces.clone(),
+                interfaces: &ty.interfaces,
                 version: graph.version,
                 authenticated: ty.authenticated,
-                policies: ty.policies.clone(),
-                scopes: ty.scopes.clone(),
+                policies: &ty.policies,
+                scopes: &ty.scopes,
             },
         );
         // NOTE(port): the TS keeps `typeInGraph` and calls `isFederationExtension(typeInGraph,
@@ -263,11 +265,11 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                     // [A!]     -> [A]      -> [A]
                     // [A]!     -> [A!]     -> [A!]
                     // Least nullable wins
-                    && last_index_of_bang(&field_state.r#type) > last_index_of_bang(&field.r#type));
+                    && last_index_of_bang(field_state.r#type) > last_index_of_bang(&field.r#type));
 
             if should_change_type {
                 // Replace the non-null type with a nullable type
-                field_state.r#type = field.r#type.clone();
+                field_state.r#type = &field.r#type;
             }
 
             if field.is_leaf {
@@ -301,7 +303,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
 
             // first wins BUT a graph overriding a field of an entity type (that provided the description) is an exception (it's applied at the supergraph level REF_1)
             if field.description.is_some() && field_state.description.is_none() {
-                field_state.description = field.description.clone();
+                field_state.description = field.description.as_ref();
             }
 
             if truthy(&field.r#override) {
@@ -324,12 +326,12 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
             field_state.by_graph.insert(
                 graph.id.clone(),
                 FieldStateInGraph {
-                    r#type: field.r#type.clone(),
+                    r#type: &field.r#type,
                     external: field.external,
                     inaccessible: field.inaccessible,
-                    description: field.description.clone(),
-                    r#override: field.r#override.clone(),
-                    override_label: field.override_label.clone(),
+                    description: field.description.as_ref(),
+                    r#override: field.r#override.as_deref(),
+                    override_label: field.override_label.as_deref(),
                     provides: field.provides.clone(),
                     requires: field.requires.clone(),
                     provided: field.provided,
@@ -337,8 +339,8 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                     shareable: field.shareable,
                     extension: field.extension,
                     authenticated: field.authenticated,
-                    policies: field.policies.clone(),
-                    scopes: field.scopes.clone(),
+                    policies: &field.policies,
+                    scopes: &field.scopes,
                     used: field.used,
                     used_as_key,
                     version: graph.version,
@@ -418,7 +420,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
             graphs
                 .values()
                 .map(|graph| JoinTypeAst {
-                    graph: graph.graph.id.clone(),
+                    graph: graph.graph.id.to_string(),
                     ..Default::default()
                 })
                 .collect()
@@ -427,9 +429,9 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
             let mut join_types = Vec::new();
             for (graph_id, meta) in &object_type.by_graph {
                 if !meta.keys.is_empty() {
-                    for key in &meta.keys {
+                    for key in meta.keys {
                         join_types.push(JoinTypeAst {
-                            graph: graph_id.clone(),
+                            graph: graph_id.to_string(),
                             key: Some(key.fields.clone()),
                             // To support Fed v1, we need to only apply `extension: true` when it's a type annotated with @extends (not by using `extend type` syntax, this needs to be ignored)
                             extension: Some(is_federation_extension(
@@ -444,7 +446,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                 }
 
                 join_types.push(JoinTypeAst {
-                    graph: graph_id.clone(),
+                    graph: graph_id.to_string(),
                     ..Default::default()
                 });
             }
@@ -463,12 +465,12 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
             for (interface_field_name, interface_field) in &interface_state.fields {
                 if let Some(found) = interface_field_graphs_by_field_name.get_mut(interface_field_name) {
                     for graph_id in interface_field.by_graph.keys() {
-                        found.insert(graph_id.clone());
+                        found.insert(graph_id.to_string());
                     }
                 } else {
                     interface_field_graphs_by_field_name.insert(
                         interface_field_name.clone(),
-                        interface_field.by_graph.keys().cloned().collect(),
+                        interface_field.by_graph.keys().map(str::to_string).collect(),
                     );
                 }
 
@@ -517,7 +519,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                     // if a field is shareable, ignore the description (I don't know why...don't ask me)
                     if truthy(&field_in_graph.r#override) && !field_in_graph.shareable {
                         // use description from that graph
-                        corrected_descriptions.insert(field.name.as_str(), field_in_graph.description.clone());
+                        corrected_descriptions.insert(field.name, field_in_graph.description.cloned());
                     }
                 }
             }
@@ -547,8 +549,8 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
         let mut field_coordinate_buffer = String::new();
 
         for field in object_type.fields.values() {
-            let field_in_graphs: Vec<(&String, &FieldStateInGraph)> = field.by_graph.iter().collect();
-            let field_coordinate = write_field_coordinate(&mut field_coordinate_buffer, &object_type.name, &field.name);
+            let field_in_graphs: Vec<(&str, &FieldStateInGraph)> = field.by_graph.iter().collect();
+            let field_coordinate = write_field_coordinate(&mut field_coordinate_buffer, &object_type.name, field.name);
             let is_effectively_required = |graph_id: &str, meta: &FieldStateInGraph| {
                 is_field_coordinate_effectively_required(
                     requires_usage_index,
@@ -598,7 +600,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                 if field
                     .args
                     .values()
-                    .any(|arg| arg.by_graph.get(*graph_id).is_some_and(|a| a.from_context.is_some()))
+                    .any(|arg| arg.by_graph.get(graph_id).is_some_and(|a| a.from_context.is_some()))
                 {
                     differences_between_graphs.context_arguments = true;
                 }
@@ -619,7 +621,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
             for (graph_id, meta) in field_in_graphs.iter().filter(|_| differences_between_graphs.r#override) {
                 let has_only_requires_usage = has_only_overridden_requires_usage(graph_id);
                 graph_join_field_state.insert(
-                    graph_id.as_str(),
+                    graph_id,
                     GraphJoinFieldState {
                         is_required: is_effectively_required(graph_id, meta),
                         external_on_join_field: cx.should_set_external_on_join_field(
@@ -677,12 +679,12 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
             };
 
             let build_override_join_fields =
-                |mode: OverrideJoinFieldMode, graphs_to_emit: &[(&String, &FieldStateInGraph)]| -> Vec<JoinFieldAst> {
+                |mode: OverrideJoinFieldMode, graphs_to_emit: &[(&str, &FieldStateInGraph)]| -> Vec<JoinFieldAst> {
                     graphs_to_emit
                         .iter()
                         .map(|(graph_id, meta)| {
                             let graph_state = graph_join_field_state
-                                .get(graph_id.as_str())
+                                .get(graph_id)
                                 .expect("graphJoinFieldState has every graph of the field");
                             let is_overridden_source_graph = overridden_graphs.is_some_and(|g| g.contains(*graph_id));
                             let used_overridden = if mode == OverrideJoinFieldMode::Object {
@@ -702,9 +704,9 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                                 field,
                                 differences_between_graphs.r#type,
                                 if mode == OverrideJoinFieldMode::Query {
-                                    meta.override_label.clone()
+                                    meta.override_label.map(str::to_string)
                                 } else {
-                                    override_labels.get(graph_id.as_str()).cloned()
+                                    override_labels.get(&**graph_id).cloned()
                                 },
                                 if mode == OverrideJoinFieldMode::Query {
                                     Some(meta.external)
@@ -752,7 +754,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                 // We do not have to emit `@join__field` if the field is shareable in every graph as well.
 
                 if differences_between_graphs.r#override && graphs.len() > 1 {
-                    let graphs_to_emit: Vec<(&String, &FieldStateInGraph)> = field_in_graphs
+                    let graphs_to_emit: Vec<(&str, &FieldStateInGraph)> = field_in_graphs
                         .iter()
                         .filter(|(graph_id, meta)| {
                             should_emit_override_join_field(graph_id, meta, OverrideJoinFieldMode::Query)
@@ -766,7 +768,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                         field_in_graphs
                             .iter()
                             .map(|(graph_id, meta)| JoinFieldAst {
-                                graph: Some((*graph_id).clone()),
+                                graph: Some(graph_id.to_string()),
                                 provides: if differences_between_graphs.provides {
                                     meta.provides.clone()
                                 } else {
@@ -784,7 +786,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
 
                 // We probably need to emit `@join__field` for every graph, except the one where the override was applied
                 if differences_between_graphs.r#override {
-                    let graphs_to_emit: Vec<(&String, &FieldStateInGraph)> = field_in_graphs
+                    let graphs_to_emit: Vec<(&str, &FieldStateInGraph)> = field_in_graphs
                         .iter()
                         .filter(|(graph_id, f)| {
                             should_emit_override_join_field(graph_id, f, OverrideJoinFieldMode::Object)
@@ -813,7 +815,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
             } else {
                 // An override is a special case, we need to emit `@join__field` only for graphs where @override was applied
                 if differences_between_graphs.r#override {
-                    let graphs_to_emit: Vec<(&String, &FieldStateInGraph)> = field_in_graphs
+                    let graphs_to_emit: Vec<(&str, &FieldStateInGraph)> = field_in_graphs
                         .iter()
                         .filter(|(graph_id, meta)| {
                             should_emit_override_join_field(graph_id, meta, OverrideJoinFieldMode::Object)
@@ -897,14 +899,14 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
                 });
             }
 
-            let description = match corrected_descriptions.get(field.name.as_str()) {
+            let description = match corrected_descriptions.get(field.name) {
                 Some(corrected) => corrected.clone(),
-                None => field.description.clone(),
+                None => field.description.cloned(),
             };
 
             fields.push(FieldAst {
-                name: field.name.clone(),
-                r#type: field.r#type.clone(),
+                name: field.name.to_string(),
+                r#type: field.r#type.to_string(),
                 inaccessible: field.inaccessible,
                 authenticated: field.authenticated,
                 policies: field.policies.clone(),
@@ -925,7 +927,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
 
         for field in resolvable_fields_from_interface_objects
             .iter()
-            .filter(|f| !object_type.fields.contains_key(&f.name))
+            .filter(|f| !object_type.fields.contains_key(f.name.as_str()))
         {
             let mut scopes: Vec<Vec<String>> = Vec::new();
             let mut policies: Vec<Vec<String>> = Vec::new();
@@ -1019,7 +1021,7 @@ impl TypeBuilder<ObjectType, ObjectTypeState> for ObjectTypeBuilder {
         let mut implements: Vec<JoinImplementsAst> = Vec::new();
         if !object_type.interfaces.is_empty() {
             for (graph, meta) in &object_type.by_graph {
-                for interface_name in &meta.interfaces {
+                for interface_name in meta.interfaces {
                     implements.push(JoinImplementsAst {
                         // NOTE(port): JS `toUpperCase`; graph ids are ASCII.
                         graph: graph.to_uppercase(),
@@ -1116,7 +1118,7 @@ struct OverrideJoinFieldInfo {
 /// The locals of `composeSupergraphNode` its inner functions (`buildContextArguments`,
 /// `shouldSetExternalOnJoinField`, ...) close over.
 struct ObjectComposeCx<'a> {
-    object_type: &'a ObjectTypeState,
+    object_type: &'a ObjectTypeState<'a>,
     graphs: &'a SubgraphStates,
     helpers: ComposeHelpers<'a>,
     interface_field_graphs_by_field_name: &'a IndexMap<String, IndexSet<String>>,
@@ -1126,7 +1128,7 @@ impl ObjectComposeCx<'_> {
     /// `objectType.byGraph.get(graphId)!`.
     /// NOTE(port): field graph ids are always graph ids of the type (both are set in the same
     /// `visitSubgraphState`); the TS would throw a `TypeError` otherwise.
-    fn object_type_in_graph(&self, graph_id: &str) -> &ObjectTypeStateInGraph {
+    fn object_type_in_graph(&self, graph_id: &str) -> &ObjectTypeStateInGraph<'_> {
         self.object_type
             .by_graph
             .get(graph_id)
@@ -1208,7 +1210,7 @@ impl ObjectComposeCx<'_> {
 
     fn create_join_fields(
         &self,
-        field_in_graphs: &[(&String, &FieldStateInGraph)],
+        field_in_graphs: &[(&str, &FieldStateInGraph)],
         field: &ObjectTypeFieldState,
         has_different_output_type: bool,
         is_effectively_required: &dyn Fn(&str, &FieldStateInGraph) -> bool,
@@ -1217,14 +1219,14 @@ impl ObjectComposeCx<'_> {
         field_in_graphs
             .iter()
             .filter_map(|(graph_id, meta)| {
-                let graph_id = graph_id.as_str();
+                let graph_id: &str = graph_id;
                 let r#type = if has_different_output_type {
-                    Some(meta.r#type.clone())
+                    Some(meta.r#type)
                 } else {
                     None
                 };
-                let r#override = meta.r#override.clone();
-                let override_label = meta.override_label.clone();
+                let r#override = meta.r#override;
+                let override_label = meta.override_label;
                 let used_overridden = is_used_overridden_in_graph(
                     field,
                     meta,
@@ -1232,7 +1234,7 @@ impl ObjectComposeCx<'_> {
                     graph_id,
                     self.helpers,
                 );
-                let in_interface_graphs = self.interface_field_graphs_by_field_name.get(&field.name);
+                let in_interface_graphs = self.interface_field_graphs_by_field_name.get(field.name);
                 let is_interface_field_in_graph = in_interface_graphs.is_some_and(|g| g.contains(graph_id));
                 let external = self.should_set_external_on_join_field(
                     meta,
@@ -1283,9 +1285,9 @@ impl ObjectComposeCx<'_> {
 
                 Some(JoinFieldAst {
                     graph: Some(graph_id.to_string()),
-                    r#type,
-                    r#override,
-                    override_label,
+                    r#type: r#type.map(str::to_string),
+                    r#override: r#override.map(str::to_string),
+                    override_label: override_label.map(str::to_string),
                     used_overridden: Some(used_overridden),
                     external: Some(external),
                     provides,
@@ -1302,13 +1304,13 @@ impl ObjectComposeCx<'_> {
 
     fn collect_override_join_field_info(
         &self,
-        field_in_graphs: &[(&String, &FieldStateInGraph)],
+        field_in_graphs: &[(&str, &FieldStateInGraph)],
     ) -> OverrideJoinFieldInfo {
         let mut override_labels: IndexMap<String, String> = IndexMap::default();
         let mut overridden_graphs: IndexSet<String> = IndexSet::default();
 
         for (to_graph_id, meta) in field_in_graphs {
-            let Some(override_name) = meta.r#override.as_deref().filter(|o| !o.is_empty()) else {
+            let Some(override_name) = meta.r#override.filter(|o| !o.is_empty()) else {
                 continue;
             };
 
@@ -1318,9 +1320,9 @@ impl ObjectComposeCx<'_> {
 
             overridden_graphs.insert(from_graph_id.clone());
 
-            if let Some(override_label) = meta.override_label.as_deref().filter(|l| !l.is_empty()) {
+            if let Some(override_label) = meta.override_label.filter(|l| !l.is_empty()) {
                 override_labels.insert(from_graph_id, override_label.to_string());
-                override_labels.insert((*to_graph_id).clone(), override_label.to_string());
+                override_labels.insert((*to_graph_id).to_string(), override_label.to_string());
             }
         }
 
@@ -1345,7 +1347,7 @@ impl ObjectComposeCx<'_> {
 
         JoinFieldAst {
             graph: Some(graph_id.to_string()),
-            r#override: meta.r#override.clone(),
+            r#override: meta.r#override.map(str::to_string),
             override_label,
             used_overridden: Some(used_overridden.unwrap_or_else(|| {
                 is_used_overridden_in_graph(
@@ -1357,7 +1359,7 @@ impl ObjectComposeCx<'_> {
                 )
             })),
             r#type: if has_different_output_type {
-                Some(meta.r#type.clone())
+                Some(meta.r#type.to_string())
             } else {
                 None
             },
@@ -1376,7 +1378,7 @@ impl ObjectComposeCx<'_> {
 /// `ObjectTypeState | InterfaceTypeState` (`markRequiresUsageFromSelectionSet`'s `currentType`).
 #[derive(Clone, Copy, Debug)]
 pub enum ObjectOrInterfaceTypeState<'s> {
-    Object(&'s ObjectTypeState),
+    Object(&'s ObjectTypeState<'s>),
     Interface(&'s InterfaceTypeState),
 }
 
@@ -1391,13 +1393,13 @@ impl<'s> ObjectOrInterfaceTypeState<'s> {
     /// `currentType.fields.get(fieldName)?.type`.
     fn field_type(&self, field_name: &str) -> Option<&'s str> {
         match self {
-            ObjectOrInterfaceTypeState::Object(t) => t.fields.get(field_name).map(|f| f.r#type.as_str()),
+            ObjectOrInterfaceTypeState::Object(t) => t.fields.get(field_name).map(|f| f.r#type),
             ObjectOrInterfaceTypeState::Interface(t) => t.fields.get(field_name).map(|f| f.r#type.as_str()),
         }
     }
 
     /// `supergraphState.objectTypes.get(name) ?? supergraphState.interfaceTypes.get(name)`.
-    fn lookup(supergraph_state: &'s SupergraphState, name: &str) -> Option<Self> {
+    fn lookup(supergraph_state: &'s SupergraphState<'s>, name: &str) -> Option<Self> {
         supergraph_state
             .object_types
             .get(name)
@@ -1418,7 +1420,7 @@ fn is_used_overridden_in_graph(
     graph_id: &str,
     helpers: ComposeHelpers<'_>,
 ) -> bool {
-    let interface_graphs_for_field = interface_field_graphs_by_field_name.get(&field.name);
+    let interface_graphs_for_field = interface_field_graphs_by_field_name.get(field.name);
     let is_interface_field_in_graph = interface_graphs_for_field.is_some_and(|g| g.contains(graph_id));
     let is_used_as_non_external_key = field_state_in_graph.used_as_key && !field_state_in_graph.external;
     let is_overridden = field
@@ -1485,7 +1487,7 @@ fn has_only_overridden_requires_dependency(
 /// The argument object of `shouldKeepObjectTypeJoinTypeInGraph`.
 struct ShouldKeepObjectTypeJoinTypeInGraphInput<'i> {
     graph_id: &'i str,
-    object_type: &'i ObjectTypeState,
+    object_type: &'i ObjectTypeState<'i>,
     requires_usage_index: &'i RequiresFieldUsageIndex,
     interface_field_graphs_by_field_name: &'i IndexMap<String, IndexSet<String>>,
     helpers: ComposeHelpers<'i>,
@@ -1518,7 +1520,7 @@ fn should_keep_object_type_join_type_in_graph(input: ShouldKeepObjectTypeJoinTyp
             continue;
         };
 
-        let field_coordinate = write_field_coordinate(&mut field_coordinate_buffer, &object_type.name, &field.name);
+        let field_coordinate = write_field_coordinate(&mut field_coordinate_buffer, &object_type.name, field.name);
         let is_effectively_required = is_field_coordinate_effectively_required(
             requires_usage_index,
             field_coordinate,
@@ -1552,7 +1554,7 @@ fn collect_overridden_graphs_by_field(field: &ObjectTypeFieldState, helpers: Com
     let mut overridden_graphs = IndexSet::default();
 
     for meta in field.by_graph.values() {
-        let Some(override_name) = meta.r#override.as_deref().filter(|o| !o.is_empty()) else {
+        let Some(override_name) = meta.r#override.filter(|o| !o.is_empty()) else {
             continue;
         };
 
@@ -1687,7 +1689,9 @@ fn mark_requires_usage_for_coordinate(
 
 /// `ObjectTypeState` (`kind: "object"`).
 #[derive(Clone, Debug, PartialEq)]
-pub struct ObjectTypeState {
+/// `'a` is the lifetime of the subgraph states: names, types and descriptions that come
+/// unchanged from a subgraph are borrowed from it rather than copied.
+pub struct ObjectTypeState<'a> {
     pub name: String,
     pub tags: IndexSet<String>,
     pub inaccessible: bool,
@@ -1697,9 +1701,9 @@ pub struct ObjectTypeState {
     pub contexts: IndexSet<String>,
     pub cost: Option<f64>,
     pub has_definition: bool,
-    pub by_graph: MapByGraph<ObjectTypeStateInGraph>,
+    pub by_graph: MapByGraph<ObjectTypeStateInGraph<'a>>,
     pub interfaces: IndexSet<String>,
-    pub fields: IndexMap<String, ObjectTypeFieldState>,
+    pub fields: IndexMap<&'a str, ObjectTypeFieldState<'a>>,
     pub is_entity: bool,
     pub description: Option<Description>,
     pub ast: Ast,
@@ -1707,9 +1711,9 @@ pub struct ObjectTypeState {
 
 /// `ObjectTypeFieldState`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ObjectTypeFieldState {
-    pub name: String,
-    pub r#type: String,
+pub struct ObjectTypeFieldState<'a> {
+    pub name: &'a str,
+    pub r#type: &'a str,
     pub tags: IndexSet<String>,
     pub inaccessible: bool,
     pub is_leaf: bool,
@@ -1721,9 +1725,9 @@ pub struct ObjectTypeFieldState {
     pub used_as_key: bool,
     pub r#override: Option<String>,
     pub override_label: Option<String>,
-    pub by_graph: MapByGraph<FieldStateInGraph>,
+    pub by_graph: MapByGraph<FieldStateInGraph<'a>>,
     pub args: IndexMap<String, ObjectTypeFieldArgState>,
-    pub description: Option<Description>,
+    pub description: Option<&'a Description>,
     pub deprecated: Option<Deprecated>,
     pub ast: Ast,
     /// `internal.seenNonExternal`.
@@ -1749,16 +1753,17 @@ pub struct ObjectTypeFieldArgState {
 
 /// `ObjectTypeStateInGraph`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ObjectTypeStateInGraph {
+/// The subgraph's own lists are borrowed, as the TS keeps references to them.
+pub struct ObjectTypeStateInGraph<'a> {
     pub has_definition: bool,
     pub extension: bool,
     pub extension_type: Option<ExtensionType>,
     pub external: bool,
     pub authenticated: bool,
-    pub policies: Vec<Vec<String>>,
-    pub scopes: Vec<Vec<String>>,
-    pub keys: Vec<Key>,
-    pub interfaces: IndexSet<String>,
+    pub policies: &'a [Vec<String>],
+    pub scopes: &'a [Vec<String>],
+    pub keys: &'a [Key],
+    pub interfaces: &'a IndexSet<String>,
     pub inaccessible: bool,
     pub shareable: bool,
     pub version: FederationVersion,
@@ -1766,21 +1771,21 @@ pub struct ObjectTypeStateInGraph {
 
 /// `FieldStateInGraph` (object fields).
 #[derive(Clone, Debug, PartialEq)]
-pub struct FieldStateInGraph {
-    pub r#type: String,
+pub struct FieldStateInGraph<'a> {
+    pub r#type: &'a str,
     pub external: bool,
-    pub description: Option<Description>,
+    pub description: Option<&'a Description>,
     pub inaccessible: bool,
     pub used: bool,
-    pub r#override: Option<String>,
-    pub override_label: Option<String>,
+    pub r#override: Option<&'a str>,
+    pub override_label: Option<&'a str>,
     pub provides: Option<String>,
     pub requires: Option<String>,
     pub provided: bool,
     pub required: bool,
     pub authenticated: bool,
-    pub policies: Vec<Vec<String>>,
-    pub scopes: Vec<Vec<String>>,
+    pub policies: &'a [Vec<String>],
+    pub scopes: &'a [Vec<String>],
     pub shareable: bool,
     pub used_as_key: bool,
     pub extension: bool,
@@ -1798,10 +1803,10 @@ pub struct ArgStateInGraph {
     pub version: FederationVersion,
 }
 
-fn get_or_create_object_type<'s>(
-    state: &'s mut IndexMap<String, ObjectTypeState>,
+fn get_or_create_object_type<'s, 'a>(
+    state: &'s mut IndexMap<String, ObjectTypeState<'a>>,
     type_name: &str,
-) -> &'s mut ObjectTypeState {
+) -> &'s mut ObjectTypeState<'a> {
     get_or_insert_with(state, type_name, || ObjectTypeState {
         name: type_name.to_string(),
         tags: IndexSet::default(),
@@ -1814,21 +1819,21 @@ fn get_or_create_object_type<'s>(
         contexts: IndexSet::default(),
         cost: None,
         interfaces: IndexSet::default(),
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         fields: IndexMap::default(),
         description: None,
         ast: Ast::default(),
     })
 }
 
-fn get_or_create_field<'s>(
-    object_type_state: &'s mut ObjectTypeState,
-    field_name: &str,
-    field_type: &str,
-) -> &'s mut ObjectTypeFieldState {
-    get_or_insert_with(&mut object_type_state.fields, field_name, || ObjectTypeFieldState {
-        name: field_name.to_string(),
-        r#type: field_type.to_string(),
+fn get_or_create_field<'s, 'a>(
+    object_type_state: &'s mut ObjectTypeState<'a>,
+    field_name: &'a str,
+    field_type: &'a str,
+) -> &'s mut ObjectTypeFieldState<'a> {
+    get_or_insert_borrowed(&mut object_type_state.fields, field_name, || ObjectTypeFieldState {
+        name: field_name,
+        r#type: field_type,
         is_leaf: false,
         tags: IndexSet::default(),
         inaccessible: false,
@@ -1840,7 +1845,7 @@ fn get_or_create_field<'s>(
         used_as_key: false,
         r#override: None,
         override_label: None,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         args: IndexMap::default(),
         description: None,
         deprecated: None,
@@ -1864,7 +1869,7 @@ fn get_or_create_arg<'s>(
         cost: None,
         default_value: None,
         from_context: None,
-        by_graph: IndexMap::default(),
+        by_graph: MapByGraph::default(),
         description: None,
         deprecated: None,
         ast: Ast::default(),
@@ -1879,17 +1884,17 @@ mod tests {
         extension: bool,
         extension_type: Option<ExtensionType>,
         has_definition: bool,
-    ) -> ObjectTypeStateInGraph {
+    ) -> ObjectTypeStateInGraph<'static> {
         ObjectTypeStateInGraph {
             has_definition,
             extension,
             extension_type,
             external: false,
             authenticated: false,
-            policies: Vec::new(),
-            scopes: Vec::new(),
-            keys: Vec::new(),
-            interfaces: IndexSet::default(),
+            policies: &[],
+            scopes: &[],
+            keys: &[],
+            interfaces: Box::leak(Box::default()),
             inaccessible: false,
             shareable: false,
             version: FederationVersion::V1_0,
@@ -1971,7 +1976,12 @@ mod tests {
         assert_eq!(index["User.id"].keys().collect::<Vec<_>>(), vec!["A", "B"]);
     }
 
-    fn add_field(state: &mut IndexMap<String, ObjectTypeState>, type_name: &str, field_name: &str, field_type: &str) {
+    fn add_field<'a>(
+        state: &mut IndexMap<String, ObjectTypeState<'a>>,
+        type_name: &str,
+        field_name: &'a str,
+        field_type: &'a str,
+    ) {
         let object_type = get_or_create_object_type(state, type_name);
         get_or_create_field(object_type, field_name, field_type);
     }

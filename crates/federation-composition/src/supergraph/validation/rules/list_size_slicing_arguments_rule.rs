@@ -21,7 +21,7 @@ use graphql_core::GraphQLError;
 /// `ListSizeSlicingArgumentsRule(context, supergraph)`.
 /// Visitor callbacks: `ObjectTypeField`, `InterfaceTypeField`.
 pub struct ListSizeSlicingArgumentsRule<'s> {
-    supergraph: &'s SupergraphState,
+    supergraph: &'s SupergraphState<'s>,
 }
 
 impl<'s> SupergraphRule<'s> for ListSizeSlicingArgumentsRule<'s> {
@@ -48,7 +48,7 @@ impl<'s> SupergraphVisitor<'s> for ListSizeSlicingArgumentsRule<'s> {
     ) -> JsResult<()> {
         let result = ensure_slicing_arguments_exist(
             &object_state.name,
-            &field_state.name,
+            field_state.name,
             field_state.list_size.as_ref(),
             |arg_name| field_state.args.get(arg_name).map(|a| a.by_graph.len()),
             field_state.by_graph.len(),
@@ -59,7 +59,7 @@ impl<'s> SupergraphVisitor<'s> for ListSizeSlicingArgumentsRule<'s> {
             SlicingArgumentsCheck::Replace(slicing_arguments) => {
                 cx.defer_state_update(SupergraphStateUpdate::ObjectFieldSlicingArguments {
                     type_name: object_state.name.clone(),
-                    field_name: field_state.name.clone(),
+                    field_name: field_state.name.to_string(),
                     slicing_arguments,
                 })
             }
@@ -91,7 +91,7 @@ impl<'s> SupergraphVisitor<'s> for ListSizeSlicingArgumentsRule<'s> {
             SlicingArgumentsCheck::Replace(slicing_arguments) => {
                 cx.defer_state_update(SupergraphStateUpdate::InterfaceFieldSlicingArguments {
                     type_name: interface_state.name.clone(),
-                    field_name: field_state.name.clone(),
+                    field_name: field_state.name.to_string(),
                     slicing_arguments,
                 })
             }
@@ -107,7 +107,7 @@ impl<'s> SupergraphVisitor<'s> for ListSizeSlicingArgumentsRule<'s> {
                 continue;
             };
 
-            let Some(implementor_field) = implementor_type.fields.get(&field_state.name) else {
+            let Some(implementor_field) = implementor_type.fields.get(field_state.name.as_str()) else {
                 continue;
             };
 
@@ -125,7 +125,7 @@ impl<'s> SupergraphVisitor<'s> for ListSizeSlicingArgumentsRule<'s> {
             // It's `true` by default anyway, so it doesn't really matter.
             cx.defer_state_update(SupergraphStateUpdate::InterfaceFieldPrintRequireOneSlicingArgument {
                 type_name: interface_state.name.clone(),
-                field_name: field_state.name.clone(),
+                field_name: field_state.name.to_string(),
             });
         }
 

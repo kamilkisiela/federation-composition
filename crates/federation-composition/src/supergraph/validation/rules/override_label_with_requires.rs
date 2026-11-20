@@ -20,8 +20,8 @@ impl<'s> SupergraphRule<'s> for OverrideLabelWithRequiresRule {
 }
 
 /// JS truthiness of a `string | null`.
-fn is_truthy(value: &Option<String>) -> bool {
-    value.as_deref().is_some_and(|v| !v.is_empty())
+fn is_truthy<S: AsRef<str>>(value: &Option<S>) -> bool {
+    value.as_ref().is_some_and(|v| !v.as_ref().is_empty())
 }
 
 impl<'s> SupergraphVisitor<'s> for OverrideLabelWithRequiresRule {
@@ -38,7 +38,6 @@ impl<'s> SupergraphVisitor<'s> for OverrideLabelWithRequiresRule {
 
             let Some(source_graph_id) = field_state_in_graph
                 .r#override
-                .as_deref()
                 .and_then(|o| cx.graph_name_to_id(o))
                 .filter(|id| !id.is_empty())
             else {

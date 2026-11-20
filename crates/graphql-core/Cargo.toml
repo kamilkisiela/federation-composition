@@ -16,6 +16,6 @@ include = ["/src/**/*.rs", "/README.md", "/LICENSE"]
 
 [dependencies]
 indexmap = { workspace = true, features = ["serde"] }
-rustc-hash.workspace = true
+ahash.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
