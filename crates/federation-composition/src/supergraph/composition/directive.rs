@@ -57,7 +57,7 @@ impl<'a> TypeBuilder<'a, Directive, DirectiveState> for DirectiveBuilder {
         for arg in directive.args.values() {
             let arg_state = get_or_create_arg(directive_state, &arg.name, &arg.r#type, arg.kind);
 
-            for tag in &arg.tags {
+            for tag in &arg.details().tags {
                 arg_state.tags.insert(tag.clone());
             }
 
@@ -242,13 +242,10 @@ mod tests {
             r#type: ty.into(),
             kind: ArgumentKind::Scalar,
             inaccessible: false,
-            tags: IndexSet::default(),
-            cost: None,
             default_value: default_value.map(String::from),
-            from_context: None,
             description: None,
-            deprecated: None,
             ast: Ast::default(),
+            details: None,
         }
     }
 

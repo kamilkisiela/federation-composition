@@ -12,7 +12,7 @@ use super::finder::{PathFinder, PathFinderResult};
 use super::graph::Graph;
 use super::helpers::OverrideLabels;
 use super::move_validator::MoveValidator;
-use super::moves::{FieldMove, Move};
+use super::moves::Move;
 use super::node::{GraphCombo, GraphNameSet, NodeId};
 use super::operation_path::{OperationPath, Step};
 use crate::utils::js::{JsError, JsResult};
@@ -342,10 +342,11 @@ impl<'s> Walker<'s> {
             // Two paths can lead to the same Node from the same graphs,
             // but only one of them may provide a context required by a `@fromContext` argument.
             let has_provides = edge.is_some_and(|edge| {
-                matches!(
-                    &merged_graph.edge(edge).r#move,
-                    Move::Field(FieldMove { provides: Some(_), .. })
-                )
+                merged_graph
+                    .edge(edge)
+                    .r#move
+                    .as_field()
+                    .is_some_and(|m| m.provides.is_some())
             });
 
             // `${tailGraphName}#provides${contextsKey}` or `${tailGraphName}${contextsKey}`

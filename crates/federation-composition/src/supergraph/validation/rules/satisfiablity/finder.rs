@@ -447,20 +447,27 @@ impl<'s> PathFinder<'s> {
         )];
         let mut final_paths: Vec<OperationPath> = Vec::new();
         let mut resolved_graphs = GraphNameSet::default();
+        let mut open_edges = Vec::new();
 
         while let Some((visited_graphs, visited_fields, path)) = queue.pop() {
             let tail = path.tail_or_root(graph);
             self.logger.log(|| format!("At path: {}", path.to_string(graph)));
             self.logger
-                .log(|| format!("Checking {} edges", graph.indirect_edges_of_head(tail).count()));
-            for (i, edge) in graph.indirect_edges_of_head(tail).enumerate() {
+                .log(|| format!("Checking {} edges", graph.indirect_edges_of_head(tail).len()));
+            // Edges into a graph visited or resolved when the search reaches this path are all
+            // skipped below ("already visited graph", "already resolved"), and the edges taken
+            // from here only resolve their own graph, so only the others are read.
+            let edges = graph.indirect_edges_of_head(tail);
+            graph.indirect_edges_outside(tail, &visited_graphs, &resolved_graphs, &mut open_edges);
+            for &i in &open_edges {
+                let indirect = &edges[i as usize];
+                let edge = indirect.edge;
                 self.logger
                     .group(|| format!("Checking #{i} {}", graph.edge_to_string(edge)));
                 self.logger
                     .log(|| format!("Visited graphs: {}", graph.graph_names.join(&visited_graphs, ",")));
 
-                let e = graph.edge(edge);
-                let edge_tail_graph_name = graph.node(e.tail).graph_name_id;
+                let edge_tail_graph_name = indirect.tail_graph;
 
                 if visited_graphs.contains(edge_tail_graph_name) {
                     self.logger.group_end("Ignore: already visited graph");
@@ -472,11 +479,38 @@ impl<'s> PathFinder<'s> {
                     continue;
                 }
 
-                if edge_tail_graph_name == source_graph_name && !is_abstract_edge(e) {
+                if edge_tail_graph_name == source_graph_name && !indirect.is_abstract {
                     // Prevent a situation where we are going back to the same graph
                     // The only exception is when we are moving to an abstract type
                     self.logger.group_end("Ignore: we are back to the same graph");
                     continue;
+                }
+
+                // What `find_field_indirectly` and `find_type_indirectly` skip first, checked
+                // here so that the common case (a graph already resolved) reads no edge.
+                let ignored = if field_name.is_some() {
+                    indirect.is_field
+                } else {
+                    !indirect.is_abstract
+                };
+                if ignored {
+                    self.logger.group_end("Ignored");
+                    continue;
+                }
+                if resolved_graphs.contains(edge_tail_graph_name) {
+                    self.logger.group_end(if field_name.is_some() {
+                        "Ignore: already resolved this graph"
+                    } else {
+                        "Already resolved the graph"
+                    });
+                    continue;
+                }
+
+                if let Some(key_fields) = indirect.key_fields {
+                    if visited_fields.iter().any(|f| f.id() == key_fields) {
+                        self.logger.group_end("Ignore: already visited fields");
+                        continue;
+                    }
                 }
 
                 if let Some(field_name) = field_name {
@@ -524,12 +558,13 @@ impl<'s> PathFinder<'s> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supergraph::validation::rules::satisfiablity::selection::test_selection;
 
     #[test]
     fn concat_if_not_exists_fields_uses_equals() {
-        let a = Selection::new("User", "id", vec![]);
-        let same_source = Selection::new("User", "id", vec![]);
-        let other_type = Selection::new("Post", "id", vec![]);
+        let a = test_selection("User", "id", vec![]);
+        let same_source = test_selection("User", "id", vec![]);
+        let other_type = test_selection("Post", "id", vec![]);
         let list = [&a];
         assert_eq!(concat_if_not_exists_fields(&list, &same_source).len(), 1);
         assert_eq!(concat_if_not_exists_fields(&list, &other_type).len(), 2);

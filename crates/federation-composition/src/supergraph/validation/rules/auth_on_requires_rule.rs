@@ -208,8 +208,8 @@ fn ensure_access_to_field(
     let found = match current_type {
         RequiresCurrentType::Object(t) => t.fields.get(field_name.as_str()).map(|f| FieldDetails {
             r#type: f.r#type.to_string(),
-            scopes: f.scopes.clone(),
-            policies: f.policies.clone(),
+            scopes: f.details().scopes.clone(),
+            policies: f.details().policies.clone(),
             authenticated: f.authenticated,
         }),
         RequiresCurrentType::Interface(t) => t.fields.get(field_name).map(|f| FieldDetails {
@@ -474,12 +474,12 @@ impl ProvisionedAccess {
             this.authenticated = true;
         }
 
-        if !field_state.scopes.is_empty() {
-            this.scopes = merge_scope_policies(&this.scopes, &field_state.scopes);
+        if !field_state.details().scopes.is_empty() {
+            this.scopes = merge_scope_policies(&this.scopes, &field_state.details().scopes);
         }
 
-        if !field_state.policies.is_empty() {
-            this.policies = merge_scope_policies(&this.policies, &field_state.policies);
+        if !field_state.details().policies.is_empty() {
+            this.policies = merge_scope_policies(&this.policies, &field_state.details().policies);
         }
 
         this

@@ -89,29 +89,31 @@ impl<'a> TypeBuilder<'a, EnumType, EnumTypeState> for EnumTypeBuilder {
             },
         );
 
-        for value in ty.values.values() {
-            let value_state = get_or_create_enum_value(enum_type_state, &value.name);
-
-            for tag in &value.tags {
-                value_state.tags.insert(tag.clone());
-            }
+        for (value_name, value) in &ty.values {
+            let value_state = get_or_create_enum_value(enum_type_state, value_name);
 
             if value.inaccessible {
                 value_state.inaccessible = true;
             }
 
-            // First deprecation wins
-            if value.deprecated.is_some() && value_state.deprecated.is_none() {
-                value_state.deprecated = value.deprecated.clone();
-            }
+            if let Some(details) = value.details() {
+                for tag in &details.tags {
+                    value_state.tags.insert(tag.clone());
+                }
 
-            // First description wins
-            if value.description.is_some() && value_state.description.is_none() {
-                value_state.description = value.description.clone();
-            }
+                // First deprecation wins
+                if details.deprecated.is_some() && value_state.deprecated.is_none() {
+                    value_state.deprecated = details.deprecated.clone();
+                }
 
-            for directive in &value.ast.directives {
-                value_state.ast.directives.push(directive.clone());
+                // First description wins
+                if details.description.is_some() && value_state.description.is_none() {
+                    value_state.description = details.description.clone();
+                }
+
+                for directive in &details.ast.directives {
+                    value_state.ast.directives.push(directive.clone());
+                }
             }
 
             value_state.by_graph.insert(

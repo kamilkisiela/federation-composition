@@ -73,7 +73,7 @@ impl<'a> TypeBuilder<'a, InputObjectType, InputObjectTypeState> for InputObjectT
         for field in ty.fields.values() {
             let field_state = get_or_create_field(input_object_type_state, &field.name, &field.r#type, field.kind);
 
-            for tag in &field.tags {
+            for tag in &field.details().tags {
                 field_state.tags.insert(tag.clone());
             }
 
@@ -86,7 +86,7 @@ impl<'a> TypeBuilder<'a, InputObjectType, InputObjectTypeState> for InputObjectT
                 field_state.inaccessible = true;
             }
 
-            if let Some(cost) = field.cost {
+            if let Some(cost) = field.details().cost {
                 field_state.cost = Some(math_max(cost, field_state.cost));
             }
 
@@ -95,8 +95,8 @@ impl<'a> TypeBuilder<'a, InputObjectType, InputObjectTypeState> for InputObjectT
             }
 
             // First deprecation wins
-            if field.deprecated.is_some() && field_state.deprecated.is_none() {
-                field_state.deprecated = field.deprecated.clone();
+            if field.details().deprecated.is_some() && field_state.deprecated.is_none() {
+                field_state.deprecated = field.details().deprecated.clone();
             }
 
             if field.default_value.is_some() {
@@ -310,12 +310,10 @@ mod tests {
             r#type: ty.into(),
             kind: ArgumentKind::Scalar,
             inaccessible: false,
-            tags: IndexSet::default(),
-            cost: None,
             default_value: default_value.map(String::from),
             description: None,
-            deprecated: None,
             ast: Ast::default(),
+            details: None,
         }
     }
 
@@ -351,7 +349,7 @@ mod tests {
             ),
         );
         let mut deprecated = field("b", "String!", None);
-        deprecated.deprecated = Some(Deprecated { reason: None });
+        deprecated.details_mut().deprecated = Some(Deprecated { reason: None });
         builder.visit_subgraph_state(
             &graph("B"),
             &mut state,
@@ -388,7 +386,7 @@ mod tests {
         let mut builder = input_object_type_builder();
         let mut state = IndexMap::default();
         let mut f = field("a", "Int", None);
-        f.cost = Some(2.0);
+        f.details_mut().cost = Some(2.0);
         builder.visit_subgraph_state(&graph("A"), &mut state, "I", &input(vec![f], None));
         assert_eq!(state["I"].fields["a"].cost, Some(2.0));
 

@@ -160,7 +160,7 @@ fn validate_directives(
                 ));
             }
 
-            if is_required_argument(arg) && arg.deprecated.is_some() {
+            if is_required_argument(arg) && arg.details().deprecated.is_some() {
                 report_error(format!(
                     "Required argument @{}({}:) cannot be deprecated.",
                     directive.name, arg.name
@@ -336,7 +336,7 @@ fn validate_fields(state: &SubgraphState, report_error: ReportErrorFn<'_>, ty: &
                 ));
             }
 
-            if is_required_argument(arg) && arg.deprecated.is_some() {
+            if is_required_argument(arg) && arg.details().deprecated.is_some() {
                 report_error(format!(
                     "Required argument {type_name}.{}({arg_name}:) cannot be deprecated.",
                     field.name
@@ -553,7 +553,7 @@ fn validate_input_fields(
             ));
         }
 
-        if is_required_input_field(field) && field.deprecated.is_some() {
+        if is_required_input_field(field) && field.details().deprecated.is_some() {
             report_error(format!(
                 "Required input field {}.{} cannot be deprecated.",
                 input_obj.name, field.name

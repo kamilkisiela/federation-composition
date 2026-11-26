@@ -39,6 +39,12 @@ impl NodeId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GraphNameId(u32);
 
+impl GraphNameId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// A set of graph names (`visitedGraphs`, `resolvedGraphs`), as a bit set over the interned
 /// ids. The first 128 subgraphs fit inline, so copying a set does not allocate.
 /// NOTE(port): the TS keeps arrays; only `includes` and `push`-if-missing are used on them, and
@@ -49,6 +55,11 @@ pub struct GraphNameSet {
 }
 
 impl GraphNameSet {
+    /// The bits of the graphs `64 * i..64 * (i + 1)`.
+    pub fn word(&self, i: usize) -> u64 {
+        self.bits.get(i).copied().unwrap_or(0)
+    }
+
     pub fn contains(&self, id: GraphNameId) -> bool {
         let i = id.0 as usize;
         self.bits.get(i / 64).is_some_and(|word| word & (1 << (i % 64)) != 0)
@@ -69,19 +80,7 @@ impl GraphNameSet {
         set
     }
 
-    /// Whether every graph of `self` is in `other` or is `extra`.
-    pub fn is_subset_of_with(&self, other: &GraphNameSet, extra: GraphNameId) -> bool {
-        let extra_word = extra.0 as usize / 64;
-        self.bits.iter().enumerate().all(|(i, &word)| {
-            let mut allowed = other.bits.get(i).copied().unwrap_or(0);
-            if i == extra_word {
-                allowed |= 1 << (extra.0 % 64);
-            }
-            word & !allowed == 0
-        })
-    }
-
-    fn iter(&self) -> impl Iterator<Item = GraphNameId> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = GraphNameId> + '_ {
         self.bits.iter().enumerate().flat_map(|(i, &word)| {
             (0..64)
                 .filter(move |bit| word & (1 << bit) != 0)
@@ -111,6 +110,12 @@ impl PartialEq for FieldName<'_> {
 }
 
 impl Eq for FieldName<'_> {}
+
+impl std::hash::Hash for FieldName<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
 
 impl fmt::Display for FieldName<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -159,6 +164,10 @@ impl<'s> GraphNames<'s> {
             }
         };
         GraphNameId(index as u32)
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.borrow().len()
     }
 
     pub fn name(&self, id: GraphNameId) -> &'s str {

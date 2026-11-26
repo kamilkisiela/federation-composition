@@ -6,6 +6,7 @@
 //! Subgraph states are immutable once validated and are shared by the validation context, the
 //! supergraph state and the builder, so they are `Rc<SubgraphState>`.
 
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use crate::utils::collections::{IndexMap, IndexSet};
@@ -608,7 +609,7 @@ fn visit_type_state(state: &mut SupergraphState, object_type_name: &str) -> JsRe
                 field_state_in_graph.requires = if new_requires.trim().is_empty() {
                     None
                 } else {
-                    Some(new_requires)
+                    Some(Cow::Owned(new_requires))
                 };
             }
 
@@ -666,7 +667,8 @@ fn visit_type_state(state: &mut SupergraphState, object_type_name: &str) -> JsRe
                 };
 
                 let new_provides = transform_fields(&key_fields, &provides)?;
-                state.object_types[type_index].fields[field_index].by_graph[graph_index].provides = Some(new_provides);
+                state.object_types[type_index].fields[field_index].by_graph[graph_index].provides =
+                    Some(Cow::Owned(new_provides));
             }
         }
     }
@@ -771,13 +773,10 @@ mod tests {
                         r#type: arg_type.into(),
                         kind: ArgumentKind::Scalar,
                         inaccessible: false,
-                        tags: IndexSet::default(),
-                        cost: None,
                         default_value: None,
-                        from_context: None,
                         description: None,
-                        deprecated: None,
                         ast: Ast::default(),
+                        details: None,
                     },
                 )]
                 .into_iter()
@@ -836,7 +835,7 @@ mod tests {
         let mut a = subgraph(
             "A",
             "a",
-            vec![SubgraphType::Union(UnionType {
+            vec![SubgraphType::Union(Box::new(UnionType {
                 name: "_Entity".into(),
                 members: IndexSet::default(),
                 contexts: IndexSet::default(),
@@ -845,7 +844,7 @@ mod tests {
                 is_definition: true,
                 description: None,
                 ast: Ast::default(),
-            })],
+            }))],
         );
         a.directives.extend([
             directive("exec", &["FIELD", "OBJECT"], "Int"),

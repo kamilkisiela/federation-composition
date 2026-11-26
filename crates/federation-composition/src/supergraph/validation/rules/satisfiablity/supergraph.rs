@@ -84,6 +84,7 @@ impl<'s> Supergraph<'s> {
 
         merged_graph.join_subgraphs()?;
         merged_graph.add_overridden_fields()?;
+        merged_graph.index_indirect_edges();
 
         supergraph
             .add_from_roots()?

@@ -8,12 +8,16 @@
 //!
 //! NOTE(port): in TS several edges can share one `Move` object (`new Edge(head, edge.move, tail)`
 //! in `duplicateNode`, `connectUnionOrInterface` and the `@provides` rewiring), and
-//! `updateOverride` mutates the shared `FieldMove`. Here every edge owns a copy of its move. This
-//! is not observable: the edges sharing a move always have the same head type, head graph, field
+//! `updateOverride` mutates the shared `FieldMove`. Here edges share a field move through `Rc`
+//! too, but `updateOverride` copies it on write, so each edge's update is its own. This is not
+//! observable: the edges sharing a move always have the same head type, head graph, field
 //! name and `provided` flag, so `addOverriddenFields` reaches and updates all of them with the same
 //! value in the same iteration (no edge is ignored before that loop ends).
 
 use std::cell::RefCell;
+use std::rc::Rc;
+
+use smallvec::SmallVec;
 
 use super::errors::LazyError;
 use super::graph::Graph;
@@ -49,6 +53,15 @@ impl EdgeResolvabilityResult<'_> {
     }
 }
 
+/// A check of an edge: the graphs and labels it was made for, and its outcome.
+/// A check is made for a few graphs, so they are a list in id order rather than a bit set over
+/// every graph of the supergraph.
+type ResolvabilityRecord<'s> = (
+    SmallVec<[GraphNameId; 4]>,
+    OverrideLabels<'s>,
+    EdgeResolvabilityResult<'s>,
+);
+
 /// `Edge<T = Move>`.
 #[derive(Debug)]
 pub struct Edge<'s> {
@@ -56,7 +69,9 @@ pub struct Edge<'s> {
     pub r#move: Move<'s>,
     pub tail: NodeId,
     /// `resolvable`: the outcome of each check, with the graphs and labels it was made for.
-    resolvable: RefCell<Vec<(GraphNameSet, OverrideLabels<'s>, EdgeResolvabilityResult<'s>)>>,
+    /// Boxed: most edges are never checked, and a pointer is a third of an empty `Vec`.
+    #[allow(clippy::box_collection)]
+    resolvable: RefCell<Option<Box<Vec<ResolvabilityRecord<'s>>>>>,
     ignored: bool,
 }
 
@@ -116,7 +131,7 @@ impl<'s> Edge<'s> {
             head,
             r#move,
             tail,
-            resolvable: RefCell::new(Vec::new()),
+            resolvable: RefCell::new(None),
             ignored: false,
         }
     }
@@ -132,8 +147,9 @@ impl<'s> Edge<'s> {
     /// `updateOverride(override)`. Throws when the move is not a field move.
     pub fn update_override(&mut self, r#override: FieldMoveOverride<'s>) -> JsResult<()> {
         match &mut self.r#move {
+            // Copy-on-write: the other edges sharing the move are updated on their own.
             Move::Field(m) => {
-                m.r#override = Some(r#override);
+                Rc::make_mut(m).r#override = Some(r#override);
                 Ok(())
             }
             other => Err(JsError::error(format!(
@@ -154,8 +170,11 @@ impl<'s> Edge<'s> {
         self.resolvable
             .borrow()
             .iter()
+            .flat_map(|records| records.iter())
             .find(|(checked_graph_names, checked_label_values, _)| {
-                checked_graph_names.is_subset_of_with(visited_graphs, graph_name)
+                checked_graph_names
+                    .iter()
+                    .all(|&g| g == graph_name || visited_graphs.contains(g))
                     && checked_label_values.matches(label_values)
             })
             .map(|(_, _, result)| result.clone())
@@ -177,9 +196,13 @@ impl<'s> Edge<'s> {
                 error: error.expect("setResolvable(false, ...) is always called with an error"),
             }
         };
-        self.resolvable
-            .borrow_mut()
-            .push((graph_names, label_values, result.clone()));
+        let mut resolvable = self.resolvable.borrow_mut();
+        let records = resolvable.get_or_insert_default();
+        // Most edges keep a few records: grow by half instead of starting at four.
+        if records.len() == records.capacity() {
+            records.reserve_exact(records.len() / 2 + 1);
+        }
+        records.push((graph_names.iter().collect(), label_values, result.clone()));
         result
     }
 }

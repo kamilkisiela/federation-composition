@@ -1,5 +1,6 @@
 //! Port of `src/supergraph/validation/rules/satisfiablity/selection.ts`.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt;
 use std::rc::Rc;
@@ -9,6 +10,7 @@ use graphql_core::{Field as FieldNode, InlineFragment, Selection as SelectionAst
 use super::node::{FieldName, FieldNames};
 use crate::subgraph::helpers::parse_fields;
 use crate::supergraph::state::SupergraphState;
+use crate::utils::collections::IndexSet;
 use crate::utils::js::{locale_compare, JsError, JsResult};
 use crate::utils::state::strip_type_modifiers;
 
@@ -48,7 +50,7 @@ fn collapse_whitespace(source: &str) -> String {
 }
 
 /// `Field` (`kind: "field"`). The names are the supergraph state's.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Field<'s> {
     pub type_name: &'s str,
     pub field_name: FieldName<'s>,
@@ -56,14 +58,14 @@ pub struct Field<'s> {
 }
 
 /// `Fragment` (`kind: "fragment"`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Fragment<'s> {
     pub type_name: &'s str,
     pub selection_set: Vec<SelectionNode<'s>>,
 }
 
 /// `SelectionNode = Field | Fragment`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SelectionNode<'s> {
     Field(Field<'s>),
     Fragment(Fragment<'s>),
@@ -86,94 +88,74 @@ impl<'s> SelectionNode<'s> {
     }
 }
 
+/// Which selections are equal (`Selection.equals`): the same type and the same resolved fields.
+/// Each distinct pair gets an id, so comparing two selections compares their ids.
+#[derive(Debug, Default)]
+pub struct SelectionIds<'s> {
+    ids: RefCell<IndexSet<(&'s str, Vec<SelectionNode<'s>>)>>,
+}
+
+impl<'s> SelectionIds<'s> {
+    pub fn selection(
+        &self,
+        type_name: &'s str,
+        source: &'s str,
+        selection_set: Vec<SelectionNode<'s>>,
+    ) -> Selection<'s> {
+        let mut ids = self.ids.borrow_mut();
+        let key = (type_name, selection_set);
+        let id = match ids.get_index_of(&key) {
+            Some(id) => id,
+            None => ids.insert_full(key.clone()).0,
+        };
+        Selection {
+            type_name,
+            source,
+            selection_set: key.1,
+            id: id as u32,
+        }
+    }
+}
+
+/// For tests: a selection with an id from one [`SelectionIds`] per thread.
+#[cfg(test)]
+pub fn test_selection(
+    type_name: &'static str,
+    source: &'static str,
+    selection_set: Vec<SelectionNode<'static>>,
+) -> Selection<'static> {
+    thread_local!(static IDS: &'static SelectionIds<'static> = Box::leak(Box::default()));
+    IDS.with(|ids| ids.selection(type_name, source, selection_set))
+}
+
 /// `Selection`: resolved key/requires/provides fields, shared (`Rc<Selection>`) by the edges
-/// created for one field or key.
+/// created for one field or key. Created by [`SelectionIds::selection`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Selection<'s> {
     type_name: &'s str,
     source: &'s str,
     pub selection_set: Vec<SelectionNode<'s>>,
+    /// Equal for equal selections, see [`SelectionIds`].
+    id: u32,
 }
 
 impl<'s> Selection<'s> {
-    pub fn new(type_name: &'s str, source: &'s str, selection_set: Vec<SelectionNode<'s>>) -> Self {
-        Selection {
-            type_name,
-            source,
-            selection_set,
-        }
-    }
-
     // TS: defined here and never called in `src/` either.
     #[allow(dead_code)]
     pub fn contains(&self, type_name: &str, field_name: &str) -> bool {
         self.contains_in(type_name, field_name, &self.selection_set)
     }
 
+    /// `equals(other)`: the same type and the same fields. The TS compares the type names,
+    /// then the sources, then the sorted selection sets; equal sources of one type resolve to
+    /// equal selection sets, so equal ids are the same answer.
     pub fn equals(&self, other: &Selection<'_>) -> bool {
-        // A selection equals itself (same type name and source).
-        if std::ptr::eq(self, other) {
-            return true;
-        }
-
-        if self.type_name != other.type_name {
-            return false;
-        }
-
-        if self.source == other.source {
-            return true;
-        }
-
-        self.selection_set_equal(&self.selection_set, &other.selection_set)
+        self.id == other.id
     }
 
-    fn selection_set_equal(
-        &self,
-        selection_set: &[SelectionNode<'_>],
-        other_selection_set: &[SelectionNode<'_>],
-    ) -> bool {
-        if selection_set.len() != other_selection_set.len() {
-            return false;
-        }
-
-        for (selection_node, other_selection_node) in selection_set.iter().zip(other_selection_set) {
-            // Fields are sorted by typeName and fieldName, so we can compare them directly.
-            // See: SelectionResolver#sort
-            let same_kind = matches!(
-                (selection_node, other_selection_node),
-                (SelectionNode::Field(_), SelectionNode::Field(_))
-                    | (SelectionNode::Fragment(_), SelectionNode::Fragment(_))
-            );
-            if !same_kind {
-                return false;
-            }
-
-            // Compare typeName and fieldName
-            if selection_node.type_name() != other_selection_node.type_name() {
-                return false;
-            }
-
-            if let (SelectionNode::Field(a), SelectionNode::Field(b)) = (selection_node, other_selection_node) {
-                if a.field_name != b.field_name {
-                    return false;
-                }
-            }
-
-            // Compare selectionSet if both are arrays,
-            // otherwise compare nullability of selectionSet (`null === null`).
-            let are_equal = match (selection_node.selection_set(), other_selection_node.selection_set()) {
-                (Some(a), Some(b)) => self.selection_set_equal(a, b),
-                (None, None) => true,
-                _ => false,
-            };
-
-            // Avoid unnecessary iterations if we already know that fields are not equal
-            if !are_equal {
-                return false;
-            }
-        }
-
-        true
+    /// Equal for equal selections (see [`Selection::equals`]).
+    pub fn id(&self) -> u32 {
+        self.id
     }
 
     /// `_contains(typeName, fieldName, selectionSet)`.
@@ -205,6 +187,7 @@ impl fmt::Display for Selection<'_> {
 pub struct SelectionResolver<'s> {
     supergraph_state: &'s SupergraphState<'s>,
     field_names: Rc<FieldNames<'s>>,
+    selection_ids: SelectionIds<'s>,
 }
 
 impl<'s> SelectionResolver<'s> {
@@ -212,6 +195,7 @@ impl<'s> SelectionResolver<'s> {
         SelectionResolver {
             supergraph_state,
             field_names,
+            selection_ids: SelectionIds::default(),
         }
     }
 
@@ -233,7 +217,7 @@ impl<'s> SelectionResolver<'s> {
             )));
         };
 
-        Ok(Rc::new(Selection::new(
+        Ok(Rc::new(self.selection_ids.selection(
             type_name,
             key_fields,
             self.resolve_selection_set_node(type_name, &selection_set_node)?,
@@ -412,7 +396,7 @@ mod tests {
 
     #[test]
     fn to_string_collapses_js_whitespace() {
-        let s = Selection::new("User", "  id\n\t name \u{a0}\u{feff}x\u{85}y ", vec![]);
+        let s = test_selection("User", "  id\n\t name \u{a0}\u{feff}x\u{85}y ", vec![]);
         // U+0085 is not JS whitespace; U+00A0 and U+FEFF are.
         assert_eq!(s.to_string(), " id name x\u{85}y ");
     }
@@ -444,7 +428,7 @@ mod tests {
 
     #[test]
     fn equals_and_contains() {
-        let a = Selection::new(
+        let a = test_selection(
             "User",
             "id profile { name }",
             vec![
@@ -456,11 +440,11 @@ mod tests {
                 }),
             ],
         );
-        let b = Selection::new("User", "id  profile { name }", a.selection_set.clone());
+        let b = test_selection("User", "id  profile { name }", a.selection_set.clone());
         assert!(a.equals(&b));
-        let c = Selection::new("User", "id profile", vec![leaf("User", "id"), leaf("User", "profile")]);
+        let c = test_selection("User", "id profile", vec![leaf("User", "id"), leaf("User", "profile")]);
         assert!(!a.equals(&c));
-        let d = Selection::new("Other", "id profile { name }", a.selection_set.clone());
+        let d = test_selection("Other", "id profile { name }", a.selection_set.clone());
         assert!(!a.equals(&d));
         assert!(a.contains("Profile", "name"));
         assert!(a.contains("User", "id"));

@@ -32,12 +32,12 @@ impl<'s> SupergraphVisitor<'s> for OverrideLabelWithRequiresRule {
         field_state: &'s ObjectTypeFieldState,
     ) -> JsResult<()> {
         for (graph_id, field_state_in_graph) in &field_state.by_graph {
-            if !is_truthy(&field_state_in_graph.r#override) || !is_truthy(&field_state_in_graph.override_label) {
+            if !is_truthy(&field_state_in_graph.r#override()) || !is_truthy(&field_state_in_graph.override_label()) {
                 continue;
             }
 
             let Some(source_graph_id) = field_state_in_graph
-                .r#override
+                .r#override()
                 .and_then(|o| cx.graph_name_to_id(o))
                 .filter(|id| !id.is_empty())
             else {

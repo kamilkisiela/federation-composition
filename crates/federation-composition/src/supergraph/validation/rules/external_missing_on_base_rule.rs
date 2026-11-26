@@ -78,12 +78,12 @@ impl<'s> SupergraphVisitor<'s> for ExternalMissingOnBaseRule<'s> {
                     .by_graph
                     .get(graph_id)
                     .ok_or_else(|| JsError::type_error("Cannot read properties of undefined (reading 'extension')"))?;
-                field_state_in_graph.external && !object_in_graph.extension
+                field_state_in_graph.external() && !object_in_graph.extension
             } else if graph_version == FederationVersion::V1_0 {
                 // In Fed v1: if a field is provided or required but it's not @key field and it's marked as @external, it's an error
-                field_state_in_graph.external && field_state_in_graph.used
+                field_state_in_graph.external() && field_state_in_graph.used()
             } else {
-                field_state_in_graph.external
+                field_state_in_graph.external()
             };
 
             if !result {

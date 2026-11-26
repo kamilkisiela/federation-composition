@@ -20,13 +20,14 @@ use graphql_core::specified_scalar_type;
 
 use super::constants::GraphId;
 use super::contexts::{ContextMask, Contexts};
-use super::edge::{assert_abstract_edge, assert_field_edge, Edge, EdgeId};
+use super::edge::{assert_abstract_edge, assert_field_edge, is_abstract_edge, Edge, EdgeId};
 use super::helpers::{is_truthy_str, score_key_fields};
 use super::moves::{AbstractMove, EntityMove, FieldMove, FieldMoveOverride, Move};
 use super::node::{
-    push_edge_index, EdgeIndexes, FieldName, FieldNames, GraphNameId, GraphNames, Node, NodeId, NodeTypeState,
+    push_edge_index, EdgeIndexes, FieldName, FieldNames, GraphNameId, GraphNameSet, GraphNames, Node, NodeId,
+    NodeTypeState,
 };
-use super::selection::{Field, Fragment, SelectionNode, SelectionResolver};
+use super::selection::{Field, Fragment, Selection, SelectionNode, SelectionResolver};
 use crate::specifications::federation::FederationVersion;
 use crate::subgraph::state::FromContext;
 use crate::supergraph::composition::enum_type::EnumTypeState;
@@ -110,8 +111,40 @@ impl<'s> TypesBySubgraph<'s> {
     }
 }
 
+/// The resolved keys of an entity node, see `Graph::resolve_tail_keys`.
+#[derive(Clone)]
+struct TailKeys<'s> {
+    is_object: bool,
+    keys: Rc<[Rc<Selection<'s>>]>,
+}
+
 /// The edges of one head returned by the `*EdgesOfHead` lookups.
 pub type EdgeList = SmallVec<[EdgeId; 8]>;
+
+/// An edge of `indirectEdgesOfHead` with what the path finder filters it on, so skipping one
+/// reads only this entry and not the edge and its nodes.
+#[derive(Clone, Copy, Debug)]
+pub struct IndirectEdge {
+    pub edge: EdgeId,
+    pub tail_graph: GraphNameId,
+    /// The [`Selection::id`] of the move's key fields, if it has some.
+    pub key_fields: Option<u32>,
+    pub is_abstract: bool,
+    pub is_field: bool,
+}
+
+/// The indirect edges of a node with many of them (an entity in many subgraphs), arranged so a
+/// walk reaches the edges into the graphs it has not visited or resolved without reading the rest.
+#[derive(Debug)]
+struct WideIndirectEdges {
+    /// The tail graphs of the edges, a bit set over the graph names.
+    tail_graphs: Box<[u64]>,
+    /// The positions of the edges, ordered by tail graph and then position.
+    by_graph: Box<[u32]>,
+}
+
+/// Nodes with more indirect edges than this get a [`WideIndirectEdges`].
+const WIDE: usize = 64;
 
 /// `Graph`.
 #[derive(Debug)]
@@ -122,6 +155,13 @@ pub struct Graph<'s> {
     edges: Vec<Edge<'s>>,
     edges_by_head_type_index: Vec<Vec<EdgeId>>,
     edges_by_tail_type_index: Vec<Vec<EdgeId>>,
+    /// `indirectEdgesOfHead` of every node, laid out by [`Graph::index_indirect_edges`] once the
+    /// graph is built: node `i`'s edges are `indirect_edges[indirect_edge_offsets[i]..indirect_edge_offsets[i + 1]]`.
+    indirect_edges: Vec<IndirectEdge>,
+    indirect_edge_offsets: Vec<u32>,
+    /// Per node, its position in `wide_indirect_edges`, `u32::MAX` if it has few indirect edges.
+    wide_indirect_edges_at: Vec<u32>,
+    wide_indirect_edges: Vec<WideIndirectEdges>,
     type_name_to_node_indexes: IndexMap<&'s str, Vec<usize>>,
     is_subgraph: bool,
     /// `idSymbol`.
@@ -208,6 +248,10 @@ impl<'s> Graph<'s> {
             edges: Vec::new(),
             edges_by_head_type_index: Vec::new(),
             edges_by_tail_type_index: Vec::new(),
+            indirect_edges: Vec::new(),
+            indirect_edge_offsets: Vec::new(),
+            wide_indirect_edges_at: Vec::new(),
+            wide_indirect_edges: Vec::new(),
             type_name_to_node_indexes: IndexMap::default(),
             is_subgraph,
             id,
@@ -433,14 +477,17 @@ impl<'s> Graph<'s> {
         }
     }
 
+    /// Connects the entity node to the other nodes of its type, one edge per resolvable key of
+    /// the other node. `tail_keys` holds each node's keys once resolved, so a node's keys are
+    /// parsed once and shared by every edge into it.
     fn connect_entities(
         &mut self,
         node_index: usize,
         same_type_name_node_indexes: &[usize],
+        tail_keys: &mut [Option<TailKeys<'s>>],
         edges_to_add: &mut Vec<Edge<'s>>,
     ) -> JsResult<()> {
         let head_node = NodeId::new(node_index);
-        let head_type_name = self.node(head_node).type_name;
 
         for &other_node_index in same_type_name_node_indexes {
             if node_index == other_node_index {
@@ -448,40 +495,60 @@ impl<'s> Graph<'s> {
             }
 
             let tail_node = NodeId::new(other_node_index);
-            let tail = self.node(tail_node);
-
-            // `"isEntity" in tailNode.typeState`: objects and interfaces.
-            let (is_entity, keys, is_object) = match tail.type_state {
-                Some(NodeTypeState::Object(ts)) => (ts.is_entity, ts.by_graph.get(tail.graph_id).map(|g| g.keys), true),
-                Some(NodeTypeState::Interface(ts)) => (
-                    ts.is_entity,
-                    ts.by_graph.get(tail.graph_id).map(|g| g.keys.as_slice()),
-                    false,
-                ),
-                _ => continue,
+            let keys = match &tail_keys[other_node_index] {
+                Some(keys) => keys.clone(),
+                None => {
+                    let keys = self.resolve_tail_keys(tail_node)?;
+                    tail_keys[other_node_index] = Some(keys.clone());
+                    keys
+                }
             };
 
-            if !is_entity {
-                continue;
-            }
-
-            let mut keys: Vec<_> = keys.map(|k| k.iter().collect()).unwrap_or_default();
-            keys.sort_by_key(|a| score_key_fields(&a.fields));
-
-            for key in keys {
-                if key.resolvable {
-                    let key_fields = self.selection_resolver.resolve(head_type_name, &key.fields)?;
-                    let r#move = if is_object {
-                        Move::Entity(EntityMove::new(key_fields))
-                    } else {
-                        Move::Abstract(AbstractMove::new(Some(key_fields)))
-                    };
-                    edges_to_add.push(Edge::new(head_node, r#move, tail_node));
-                }
+            for key_fields in keys.keys.iter() {
+                let r#move = if keys.is_object {
+                    Move::Entity(EntityMove::new(key_fields.clone()))
+                } else {
+                    Move::Abstract(AbstractMove::new(Some(key_fields.clone())))
+                };
+                edges_to_add.push(Edge::new(head_node, r#move, tail_node));
             }
         }
 
         Ok(())
+    }
+
+    /// The resolvable keys an entity move into `tail` can use, best scored first (none if the
+    /// tail's type is not an entity).
+    fn resolve_tail_keys(&self, tail_node: NodeId) -> JsResult<TailKeys<'s>> {
+        let tail = self.node(tail_node);
+
+        // `"isEntity" in tailNode.typeState`: objects and interfaces.
+        let (is_entity, keys, is_object) = match tail.type_state {
+            Some(NodeTypeState::Object(ts)) => (ts.is_entity, ts.by_graph.get(tail.graph_id).map(|g| g.keys), true),
+            Some(NodeTypeState::Interface(ts)) => (
+                ts.is_entity,
+                ts.by_graph.get(tail.graph_id).map(|g| g.keys.as_slice()),
+                false,
+            ),
+            _ => (false, None, false),
+        };
+
+        if !is_entity {
+            return Ok(TailKeys {
+                is_object,
+                keys: Rc::from([]),
+            });
+        }
+
+        let mut keys: Vec<_> = keys.map(|k| k.iter().collect()).unwrap_or_default();
+        keys.sort_by_key(|a| score_key_fields(&a.fields));
+
+        let keys = keys
+            .into_iter()
+            .filter(|key| key.resolvable)
+            .map(|key| self.selection_resolver.resolve(tail.type_name, &key.fields))
+            .collect::<JsResult<Rc<[_]>>>()?;
+        Ok(TailKeys { is_object, keys })
     }
 
     /// `edgesByHeadTypeIndex[head.index][index]`, throwing `Expected edge to be defined` when
@@ -708,7 +775,7 @@ impl<'s> Graph<'s> {
             let new_tail = self.duplicate_node(edge_tail, &edge_move);
             let new_edge = self.push_edge(Edge::new(
                 edge_head,
-                Move::Field(FieldMove::new(
+                Move::field(FieldMove::new(
                     field_move.type_name,
                     field_move.field_name,
                     field_move.requires,
@@ -736,6 +803,7 @@ impl<'s> Graph<'s> {
         // for each entity type, we want to assign one entity node to a matching entity node in other subgraphs
         // for each interface type, we want to assign one interface node to a matching interface node in other subgraphs
         let mut edges_to_add: Vec<Edge<'s>> = Vec::new();
+        let mut tail_keys: Vec<Option<TailKeys<'s>>> = vec![None; self.nodes.len()];
 
         for i in 0..self.nodes.len() {
             let type_node = NodeId::new(i);
@@ -754,7 +822,7 @@ impl<'s> Graph<'s> {
             };
 
             if let Some(interfaces) = entity_interfaces {
-                self.connect_entities(i, &other_nodes_indexes, &mut edges_to_add)?;
+                self.connect_entities(i, &other_nodes_indexes, &mut tail_keys, &mut edges_to_add)?;
 
                 for &h in &other_nodes_indexes {
                     let head = NodeId::new(h);
@@ -820,9 +888,12 @@ impl<'s> Graph<'s> {
             }
         }
 
+        drop(tail_keys);
+        self.edges.reserve_exact(edges_to_add.len());
         while let Some(edge) = edges_to_add.pop() {
             self.add_edge(edge);
         }
+        drop(edges_to_add);
 
         // iterate over all edges
         let head_edges_length = self.edges_by_head_type_index.len();
@@ -837,12 +908,8 @@ impl<'s> Graph<'s> {
                 }
 
                 // ignore non-field edges
-                let provides = match &self.edge(edge).r#move {
-                    Move::Field(FieldMove {
-                        provides: Some(provides),
-                        ..
-                    }) => provides.clone(),
-                    _ => continue,
+                let Some(provides) = self.edge(edge).r#move.as_field().and_then(|m| m.provides.clone()) else {
+                    continue;
                 };
 
                 // find field edges that are provided and mark them as resolvable.
@@ -908,16 +975,16 @@ impl<'s> Graph<'s> {
                     return Err(JsError::error("Expected to find field state"));
                 };
 
-                if !is_truthy_str(&field_state.override_label) {
+                if !is_truthy_str(&field_state.details().override_label) {
                     return Err(JsError::error("Expected a label on a field"));
                 }
 
                 for field_state_in_graph in field_state.by_graph.values() {
-                    if is_truthy_str(&field_state_in_graph.override_label)
-                        && is_truthy_str(&field_state_in_graph.r#override)
+                    if is_truthy_str(&field_state_in_graph.override_label())
+                        && is_truthy_str(&field_state_in_graph.r#override())
                     {
                         let from_graph_id = field_state_in_graph
-                            .r#override
+                            .r#override()
                             .and_then(|graph_name| self.graph_name_to_id(graph_name));
                         let Some(from_graph_id) = from_graph_id.filter(|id| !id.is_empty()) else {
                             // Looks like there is no such graph, we ignore it
@@ -926,8 +993,8 @@ impl<'s> Graph<'s> {
 
                         // When the label is on, use the field with `@override(from:)`
                         if let Move::Field(m) = &mut self.edges[super_field_edge.index()].r#move {
-                            m.r#override = Some(FieldMoveOverride {
-                                label: field_state_in_graph.override_label,
+                            Rc::make_mut(m).r#override = Some(FieldMoveOverride {
+                                label: field_state_in_graph.override_label(),
                                 value: true,
                                 from_graph_id: Some(from_graph_id),
                             });
@@ -936,13 +1003,13 @@ impl<'s> Graph<'s> {
                         // When the label is off, use the other field
                         self.add_edge(Edge::new(
                             head,
-                            Move::Field(FieldMove::new(
+                            Move::field(FieldMove::new(
                                 type_name,
                                 field_name,
                                 None,
                                 None,
                                 Some(FieldMoveOverride {
-                                    label: field_state_in_graph.override_label,
+                                    label: field_state_in_graph.override_label(),
                                     value: false,
                                     from_graph_id: None,
                                 }),
@@ -1191,7 +1258,7 @@ impl<'s> Graph<'s> {
     /// cross-graph edges too (`.filter((edge, i, all) => all.indexOf(edge) === i)`).
     /// Both position lists are increasing and an edge has one position in the head's list, so
     /// an abstract edge is a duplicate exactly when its position is a cross-graph one.
-    pub fn indirect_edges_of_head(&self, head: NodeId) -> impl Iterator<Item = EdgeId> + use<'_, 's> {
+    fn scan_indirect_edges(&self, head: NodeId) -> impl Iterator<Item = EdgeId> + use<'_, 's> {
         let node = self.node(head);
         let cross_graph = &node.cross_graph_edge_indexes;
         let abstract_only = node
@@ -1203,6 +1270,103 @@ impl<'s> Graph<'s> {
             head,
             cross_graph.iter().map(|&i| (i, "cross-graph")).chain(abstract_only),
         )
+    }
+
+    /// Lays out `indirectEdgesOfHead` of every node (see [`Graph::indirect_edges_of_head`]).
+    /// Called once the graph is built; edges added or ignored afterwards are not seen.
+    pub fn index_indirect_edges(&mut self) {
+        let mut edges = Vec::new();
+        let mut offsets = Vec::with_capacity(self.nodes.len() + 1);
+        offsets.push(0);
+        for i in 0..self.nodes.len() {
+            edges.extend(self.scan_indirect_edges(NodeId::new(i)).map(|edge| {
+                let e = self.edge(edge);
+                IndirectEdge {
+                    edge,
+                    tail_graph: self.node(e.tail).graph_name_id,
+                    key_fields: match &e.r#move {
+                        Move::Entity(m) => Some(m.key_fields.id()),
+                        Move::Abstract(m) => m.key_fields.as_ref().map(|k| k.id()),
+                        Move::Field(_) => None,
+                    },
+                    is_abstract: is_abstract_edge(e),
+                    is_field: matches!(e.r#move, Move::Field(_)),
+                }
+            }));
+            offsets.push(edges.len() as u32);
+        }
+
+        let words = self.graph_names.len().div_ceil(64);
+        let mut wide_at = Vec::with_capacity(self.nodes.len());
+        let mut wide = Vec::new();
+        for range in offsets.windows(2) {
+            let node_edges = &edges[range[0] as usize..range[1] as usize];
+            if node_edges.len() <= WIDE {
+                wide_at.push(u32::MAX);
+                continue;
+            }
+            let mut tail_graphs = vec![0u64; words].into_boxed_slice();
+            for e in node_edges {
+                tail_graphs[e.tail_graph.index() / 64] |= 1 << (e.tail_graph.index() % 64);
+            }
+            let mut by_graph: Box<[u32]> = (0..node_edges.len() as u32).collect();
+            by_graph.sort_by_key(|&p| (node_edges[p as usize].tail_graph.index(), p));
+            wide_at.push(wide.len() as u32);
+            wide.push(WideIndirectEdges { tail_graphs, by_graph });
+        }
+
+        self.indirect_edges = edges;
+        self.indirect_edge_offsets = offsets;
+        self.wide_indirect_edges_at = wide_at;
+        self.wide_indirect_edges = wide;
+    }
+
+    /// Fills `out` with the positions in `indirect_edges_of_head(head)` of the edges whose tail
+    /// graph is in neither `a` nor `b`, in order.
+    pub fn indirect_edges_outside(&self, head: NodeId, a: &GraphNameSet, b: &GraphNameSet, out: &mut Vec<u32>) {
+        out.clear();
+        let edges = self.indirect_edges_of_head(head);
+        let outside = |p: &u32| {
+            let g = edges[*p as usize].tail_graph;
+            !a.contains(g) && !b.contains(g)
+        };
+        let Some(wide) = self
+            .wide_indirect_edges
+            .get(self.wide_indirect_edges_at[head.index()] as usize)
+        else {
+            out.extend((0..edges.len() as u32).filter(outside));
+            return;
+        };
+
+        let open = |w: usize| wide.tail_graphs[w] & !a.word(w) & !b.word(w);
+        let count = |f: &dyn Fn(usize) -> u64| (0..wide.tail_graphs.len()).map(|w| f(w).count_ones()).sum::<u32>();
+        // Most graphs open (early in a search): one pass in order is cheaper than gathering.
+        if count(&open) * 4 > count(&|w| wide.tail_graphs[w]) {
+            out.extend((0..edges.len() as u32).filter(outside));
+            return;
+        }
+        for w in 0..wide.tail_graphs.len() {
+            let mut bits = open(w);
+            while bits != 0 {
+                let g = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let start = wide
+                    .by_graph
+                    .partition_point(|&p| edges[p as usize].tail_graph.index() < g);
+                out.extend(
+                    wide.by_graph[start..]
+                        .iter()
+                        .take_while(|&&p| edges[p as usize].tail_graph.index() == g),
+                );
+            }
+        }
+        out.sort_unstable();
+    }
+
+    /// `indirectEdgesOfHead(head)` of a graph laid out by [`Graph::index_indirect_edges`].
+    pub fn indirect_edges_of_head(&self, head: NodeId) -> &[IndirectEdge] {
+        let i = head.index();
+        &self.indirect_edges[self.indirect_edge_offsets[i] as usize..self.indirect_edge_offsets[i + 1] as usize]
     }
 
     pub fn edges_of_head(&self, head: NodeId) -> Vec<EdgeId> {
@@ -1543,7 +1707,7 @@ impl<'s> Graph<'s> {
 
         self.add_edge(Edge::new(
             head,
-            Move::Field(FieldMove::new(
+            Move::field(FieldMove::new(
                 head_type_name,
                 self.field_names.intern(&field.name),
                 requires,
@@ -1592,7 +1756,7 @@ impl<'s> Graph<'s> {
 
         if self.is_supergraph() && field.by_graph.len() == 1 {
             if let Some((graph_id, field_in_graph)) = field.by_graph.first() {
-                let is_external = field_in_graph.external;
+                let is_external = field_in_graph.external();
                 let is_federation_v1 = state
                     .subgraphs
                     .get(graph_id)
@@ -1608,7 +1772,7 @@ impl<'s> Graph<'s> {
         let field_type = field
             .by_graph
             .get(self.id_str)
-            .map(|f| f.r#type)
+            .map(|f| f.r#type())
             .unwrap_or(field.r#type);
         Some(self.output_type_name(field_type))
     }
@@ -1632,7 +1796,7 @@ impl<'s> Graph<'s> {
             // This is because we want to allow progressive overrides
             let edge = Edge::new(
                 head,
-                Move::Field(FieldMove::new(
+                Move::field(FieldMove::new(
                     head_type_name,
                     self.field_names.intern(field.name),
                     None,
@@ -1643,7 +1807,8 @@ impl<'s> Graph<'s> {
                 )),
                 tail,
             );
-            let apply_override = is_truthy_str(&field.r#override) && is_truthy_str(&field.override_label);
+            let apply_override =
+                is_truthy_str(&field.details().r#override) && is_truthy_str(&field.details().override_label);
             let edge = self.add_edge(edge);
             if apply_override {
                 self.super_field_edges_to_apply_override.push(edge);
@@ -1654,8 +1819,8 @@ impl<'s> Graph<'s> {
         let field_state_in_graph = field.by_graph.get(self.node(head).graph_id);
         let requires = field_state_in_graph.and_then(|f| f.requires.as_deref());
         let provides = field_state_in_graph.and_then(|f| f.provides.as_deref());
-        let r#override = field_state_in_graph.and_then(|f| f.r#override);
-        let override_label = field_state_in_graph.and_then(|f| f.override_label);
+        let r#override = field_state_in_graph.and_then(|f| f.r#override());
+        let override_label = field_state_in_graph.and_then(|f| f.override_label());
         let override_from_graph_id = match r#override {
             Some(r#override) if !r#override.is_empty() => self.graph_name_to_id(r#override),
             _ => None,
@@ -1683,7 +1848,7 @@ impl<'s> Graph<'s> {
 
         self.add_edge(Edge::new(
             head,
-            Move::Field(FieldMove::new(
+            Move::field(FieldMove::new(
                 head_type_name,
                 self.field_names.intern(field.name),
                 requires,

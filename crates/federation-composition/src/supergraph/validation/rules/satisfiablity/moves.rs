@@ -10,15 +10,20 @@ use super::contexts::ContextMask;
 use super::node::FieldName;
 use super::selection::Selection;
 
-/// `Move`.
+/// `Move`. A field move is the large one, and the edges copied onto the other nodes of an
+/// interface or union share it, as in TS.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Move<'s> {
-    Field(FieldMove<'s>),
+    Field(Rc<FieldMove<'s>>),
     Abstract(AbstractMove<'s>),
     Entity(EntityMove<'s>),
 }
 
 impl<'s> Move<'s> {
+    pub fn field(m: FieldMove<'s>) -> Self {
+        Move::Field(Rc::new(m))
+    }
+
     pub fn as_field(&self) -> Option<&FieldMove<'s>> {
         match self {
             Move::Field(m) => Some(m),
@@ -161,7 +166,9 @@ mod tests {
     use crate::supergraph::validation::rules::satisfiablity::node::test_field_name;
 
     fn selection(source: &'static str) -> Rc<Selection<'static>> {
-        Rc::new(Selection::new("User", source, Vec::new()))
+        Rc::new(
+            crate::supergraph::validation::rules::satisfiablity::selection::test_selection("User", source, Vec::new()),
+        )
     }
 
     #[test]

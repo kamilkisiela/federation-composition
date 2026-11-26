@@ -40,14 +40,14 @@ impl<'s> SupergraphVisitor<'s> for ExternalArgumentMissingRule {
         let graphs_with_required_arg: Vec<&str> = arg_state
             .by_graph
             .keys()
-            .filter(|graph| /*arg.type.endsWith('!') && */ field_state.by_graph.get(graph).map(|f| f.external) != Some(true))
+            .filter(|graph| /*arg.type.endsWith('!') && */ field_state.by_graph.get(graph).map(|f| f.external()) != Some(true))
             .collect();
         let external_graphs_without_arg: Vec<&str> = field_state
             .by_graph
             .keys()
             .filter(|graph| {
                 !arg_state.by_graph.contains_key(graph)
-                    && field_state.by_graph.get(graph).map(|f| f.external) == Some(true)
+                    && field_state.by_graph.get(graph).map(|f| f.external()) == Some(true)
             })
             .collect();
 

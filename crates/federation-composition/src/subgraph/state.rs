@@ -12,7 +12,7 @@
 //! - AST directives stored in the state (`ast.directives`) are owned clones of the document's
 //!   nodes.
 
-use crate::utils::collections::{IndexMap, IndexSet};
+use crate::utils::collections::{AHashBuilder, IndexMap, IndexSet};
 use graphql_core::{
     specified_scalar_types, Ancestor, Definition, Directive as DirectiveNode, DirectiveDefinition, DirectiveLocation,
     Document, EnumValueDefinition, FieldDefinition, InputValueDefinition, InterfaceTypeDefinition,
@@ -31,15 +31,15 @@ use crate::subgraph::validation::validation_context::SubgraphValidationContext;
 use crate::utils::auth::merge_scope_policies;
 use crate::utils::js::{JsError, JsResult};
 
-/// `SubgraphType`.
+/// `SubgraphType`. Boxed, so each entry of a subgraph's types takes the size of its own kind.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SubgraphType {
-    Object(ObjectType),
-    Interface(InterfaceType),
-    InputObject(InputObjectType),
-    Union(UnionType),
-    Enum(EnumType),
-    Scalar(ScalarType),
+    Object(Box<ObjectType>),
+    Interface(Box<InterfaceType>),
+    InputObject(Box<InputObjectType>),
+    Union(Box<UnionType>),
+    Enum(Box<EnumType>),
+    Scalar(Box<ScalarType>),
     // NOTE(port): the TS union still lists `Directive`, but directives live in
     // `SubgraphState::directives` (their own namespace), never in `types`.
 }
@@ -258,6 +258,20 @@ pub struct Field {
     pub external: bool,
     pub inaccessible: bool,
     pub authenticated: bool,
+    pub extension: bool,
+    pub required: bool,
+    pub provided: bool,
+    pub shareable: bool,
+    pub used_as_key: bool,
+    pub used: bool,
+    pub description: Option<Description>,
+    pub ast: Ast,
+    pub(crate) details: Option<Box<FieldDetails>>,
+}
+
+/// The parts of a [`Field`] most fields do not set, boxed so a plain field stays small.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldDetails {
     pub policies: Vec<Vec<String>>,
     pub scopes: Vec<Vec<String>>,
     pub cost: Option<f64>,
@@ -266,16 +280,41 @@ pub struct Field {
     pub override_label: Option<String>,
     pub provides: Option<String>,
     pub requires: Option<String>,
-    pub extension: bool,
-    pub required: bool,
-    pub provided: bool,
-    pub shareable: bool,
-    pub used_as_key: bool,
-    pub used: bool,
     pub tags: IndexSet<String>,
-    pub description: Option<Description>,
     pub deprecated: Option<Deprecated>,
-    pub ast: Ast,
+}
+
+impl FieldDetails {
+    const EMPTY: FieldDetails = FieldDetails {
+        policies: Vec::new(),
+        scopes: Vec::new(),
+        cost: None,
+        list_size: None,
+        r#override: None,
+        override_label: None,
+        provides: None,
+        requires: None,
+        tags: IndexSet::with_hasher(AHashBuilder),
+        deprecated: None,
+    };
+}
+
+impl Default for FieldDetails {
+    fn default() -> Self {
+        FieldDetails::EMPTY
+    }
+}
+
+impl Field {
+    /// The rarely set parts, empty when none is set.
+    pub fn details(&self) -> &FieldDetails {
+        static EMPTY: FieldDetails = FieldDetails::EMPTY;
+        self.details.as_deref().unwrap_or(&EMPTY)
+    }
+
+    pub fn details_mut(&mut self) -> &mut FieldDetails {
+        self.details.get_or_insert_default()
+    }
 }
 
 /// `InputField`.
@@ -285,24 +324,72 @@ pub struct InputField {
     pub r#type: String,
     pub kind: ArgumentKind,
     pub inaccessible: bool,
-    pub tags: IndexSet<String>,
-    pub cost: Option<f64>,
     /// The printed default value (`print(node.defaultValue)`).
     pub default_value: Option<String>,
+    pub description: Option<Description>,
+    pub ast: Ast,
+    pub(crate) details: Option<Box<InputFieldDetails>>,
+}
+
+/// The parts of an [`InputField`] most input fields do not set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputFieldDetails {
+    pub tags: IndexSet<String>,
+    pub cost: Option<f64>,
+    pub deprecated: Option<Deprecated>,
+}
+
+impl InputFieldDetails {
+    const EMPTY: InputFieldDetails = InputFieldDetails {
+        tags: IndexSet::with_hasher(AHashBuilder),
+        cost: None,
+        deprecated: None,
+    };
+}
+
+impl Default for InputFieldDetails {
+    fn default() -> Self {
+        InputFieldDetails::EMPTY
+    }
+}
+
+impl InputField {
+    /// The rarely set parts, empty when none is set.
+    pub fn details(&self) -> &InputFieldDetails {
+        static EMPTY: InputFieldDetails = InputFieldDetails::EMPTY;
+        self.details.as_deref().unwrap_or(&EMPTY)
+    }
+
+    pub fn details_mut(&mut self) -> &mut InputFieldDetails {
+        self.details.get_or_insert_default()
+    }
+}
+
+/// `EnumValue`. Its name is its key in [`EnumType::values`]. Most values have no tags,
+/// description, deprecation or directives, so those are behind one box.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EnumValue {
+    pub inaccessible: bool,
+    details: Option<Box<EnumValueDetails>>,
+}
+
+/// The rarely set parts of an [`EnumValue`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EnumValueDetails {
+    pub tags: IndexSet<String>,
     pub description: Option<Description>,
     pub deprecated: Option<Deprecated>,
     pub ast: Ast,
 }
 
-/// `EnumValue`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EnumValue {
-    pub name: String,
-    pub inaccessible: bool,
-    pub tags: IndexSet<String>,
-    pub description: Option<Description>,
-    pub deprecated: Option<Deprecated>,
-    pub ast: Ast,
+impl EnumValue {
+    pub fn details(&self) -> Option<&EnumValueDetails> {
+        self.details.as_deref()
+    }
+
+    fn details_mut(&mut self) -> &mut EnumValueDetails {
+        self.details.get_or_insert_default()
+    }
 }
 
 /// `fromContext?: { context, selection }`.
@@ -319,13 +406,46 @@ pub struct Argument {
     pub r#type: String,
     pub kind: ArgumentKind,
     pub inaccessible: bool,
+    pub default_value: Option<String>,
+    pub description: Option<Description>,
+    pub ast: Ast,
+    pub(crate) details: Option<Box<ArgumentDetails>>,
+}
+
+/// The parts of an [`Argument`] most arguments do not set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArgumentDetails {
     pub tags: IndexSet<String>,
     pub cost: Option<f64>,
-    pub default_value: Option<String>,
     pub from_context: Option<FromContext>,
-    pub description: Option<Description>,
     pub deprecated: Option<Deprecated>,
-    pub ast: Ast,
+}
+
+impl ArgumentDetails {
+    const EMPTY: ArgumentDetails = ArgumentDetails {
+        tags: IndexSet::with_hasher(AHashBuilder),
+        cost: None,
+        from_context: None,
+        deprecated: None,
+    };
+}
+
+impl Default for ArgumentDetails {
+    fn default() -> Self {
+        ArgumentDetails::EMPTY
+    }
+}
+
+impl Argument {
+    /// The rarely set parts, empty when none is set.
+    pub fn details(&self) -> &ArgumentDetails {
+        static EMPTY: ArgumentDetails = ArgumentDetails::EMPTY;
+        self.details.as_deref().unwrap_or(&EMPTY)
+    }
+
+    pub fn details_mut(&mut self) -> &mut ArgumentDetails {
+        self.details.get_or_insert_default()
+    }
 }
 
 /// `Key`.
@@ -1548,6 +1668,7 @@ pub struct DirectiveArgBuilder<'s> {
 impl DirectiveArgBuilder<'_> {
     pub fn set_tag(self, directive_name: &str, arg_name: &str, tag: &str) -> JsResult<()> {
         get_or_create_directive_arg(self.state, directive_name, arg_name)?
+            .details_mut()
             .tags
             .insert(tag.to_string());
         Ok(())
@@ -1900,7 +2021,7 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
             return self.interface_field().set_deprecated(type_name, field_name, reason);
         }
 
-        self.field(type_name, field_name)?.deprecated = Some(Deprecated {
+        self.field(type_name, field_name)?.details_mut().deprecated = Some(Deprecated {
             reason: reason.map(str::to_string),
         });
         Ok(())
@@ -1920,7 +2041,7 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
 
         let existing = self.field(type_name, field_name)?;
 
-        existing.policies = merge_scope_policies(&existing.policies, policies);
+        existing.details_mut().policies = merge_scope_policies(&existing.details_mut().policies, policies);
         Ok(())
     }
     pub fn set_scopes(self, type_name: &str, field_name: &str, scopes: &[Vec<String>]) -> JsResult<()> {
@@ -1930,7 +2051,7 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
 
         let existing = self.field(type_name, field_name)?;
 
-        existing.scopes = merge_scope_policies(&existing.scopes, scopes);
+        existing.details_mut().scopes = merge_scope_policies(&existing.details_mut().scopes, scopes);
         Ok(())
     }
     pub fn set_cost(self, type_name: &str, field_name: &str, cost: f64) -> JsResult<()> {
@@ -1938,7 +2059,7 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
             return self.interface_field().set_cost(type_name, field_name, cost);
         }
 
-        self.field(type_name, field_name)?.cost = Some(cost);
+        self.field(type_name, field_name)?.details_mut().cost = Some(cost);
         Ok(())
     }
     pub fn set_list_size(self, type_name: &str, field_name: &str, list_size: ListSize) -> JsResult<()> {
@@ -1946,7 +2067,7 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
             return self.interface_field().set_list_size(type_name, field_name, list_size);
         }
 
-        self.field(type_name, field_name)?.list_size = Some(list_size);
+        self.field(type_name, field_name)?.details_mut().list_size = Some(list_size);
         Ok(())
     }
     pub fn set_external(self, type_name: &str, field_name: &str) -> JsResult<()> {
@@ -1979,8 +2100,8 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
         }
 
         let field = self.field(type_name, field_name)?;
-        field.r#override = Some(r#override.to_string());
-        field.override_label = label.map(str::to_string);
+        field.details_mut().r#override = Some(r#override.to_string());
+        field.details_mut().override_label = label.map(str::to_string);
         Ok(())
     }
     pub fn set_provides(self, type_name: &str, field_name: &str, provides: &str) -> JsResult<()> {
@@ -1988,7 +2109,7 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
             return self.interface_field().set_provides(type_name, field_name, provides);
         }
 
-        self.field(type_name, field_name)?.provides = Some(provides.to_string());
+        self.field(type_name, field_name)?.details_mut().provides = Some(provides.to_string());
         Ok(())
     }
     pub fn set_requires(self, type_name: &str, field_name: &str, requires: &str) -> JsResult<()> {
@@ -1996,7 +2117,7 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
             return self.interface_field().set_requires(type_name, field_name, requires);
         }
 
-        self.field(type_name, field_name)?.requires = Some(requires.to_string());
+        self.field(type_name, field_name)?.details_mut().requires = Some(requires.to_string());
         Ok(())
     }
     pub fn mark_as_provided(self, type_name: &str, field_name: &str) -> JsResult<()> {
@@ -2028,7 +2149,10 @@ impl<'s> ObjectTypeFieldBuilder<'s> {
             return self.interface_field().set_tag(type_name, field_name, tag);
         }
 
-        self.field(type_name, field_name)?.tags.insert(tag.to_string());
+        self.field(type_name, field_name)?
+            .details_mut()
+            .tags
+            .insert(tag.to_string());
         Ok(())
     }
     pub fn set_used(self, type_name: &str, field_name: &str) -> JsResult<()> {
@@ -2113,7 +2237,7 @@ impl<'s> ObjectTypeFieldArgBuilder<'s> {
                 .set_deprecated(type_name, field_name, arg_name, reason);
         }
 
-        self.arg(type_name, field_name, arg_name)?.deprecated = Some(Deprecated {
+        self.arg(type_name, field_name, arg_name)?.details_mut().deprecated = Some(Deprecated {
             reason: reason.map(str::to_string),
         });
         Ok(())
@@ -2174,7 +2298,7 @@ impl<'s> ObjectTypeFieldArgBuilder<'s> {
                 .set_from_context(type_name, field_name, arg_name, from_context);
         }
 
-        self.arg(type_name, field_name, arg_name)?.from_context = Some(from_context);
+        self.arg(type_name, field_name, arg_name)?.details_mut().from_context = Some(from_context);
         Ok(())
     }
     pub fn set_tag(self, type_name: &str, field_name: &str, arg_name: &str, tag: &str) -> JsResult<()> {
@@ -2182,7 +2306,10 @@ impl<'s> ObjectTypeFieldArgBuilder<'s> {
             return self.interface_arg().set_tag(type_name, field_name, arg_name, tag);
         }
 
-        self.arg(type_name, field_name, arg_name)?.tags.insert(tag.to_string());
+        self.arg(type_name, field_name, arg_name)?
+            .details_mut()
+            .tags
+            .insert(tag.to_string());
         Ok(())
     }
     pub fn set_cost(self, type_name: &str, field_name: &str, arg_name: &str, cost: f64) -> JsResult<()> {
@@ -2190,7 +2317,7 @@ impl<'s> ObjectTypeFieldArgBuilder<'s> {
             return self.interface_arg().set_cost(type_name, field_name, arg_name, cost);
         }
 
-        self.arg(type_name, field_name, arg_name)?.cost = Some(cost);
+        self.arg(type_name, field_name, arg_name)?.details_mut().cost = Some(cost);
         Ok(())
     }
 }
@@ -2305,20 +2432,20 @@ impl<'s> InterfaceTypeFieldBuilder<'s> {
     }
     pub fn set_policies(self, type_name: &str, field_name: &str, policies: &[Vec<String>]) -> JsResult<()> {
         let existing = self.field(type_name, field_name)?;
-        existing.policies = merge_scope_policies(&existing.policies, policies);
+        existing.details_mut().policies = merge_scope_policies(&existing.details_mut().policies, policies);
         Ok(())
     }
     pub fn set_scopes(self, type_name: &str, field_name: &str, scopes: &[Vec<String>]) -> JsResult<()> {
         let existing = self.field(type_name, field_name)?;
-        existing.scopes = merge_scope_policies(&existing.scopes, scopes);
+        existing.details_mut().scopes = merge_scope_policies(&existing.details_mut().scopes, scopes);
         Ok(())
     }
     pub fn set_cost(self, type_name: &str, field_name: &str, cost: f64) -> JsResult<()> {
-        self.field(type_name, field_name)?.cost = Some(cost);
+        self.field(type_name, field_name)?.details_mut().cost = Some(cost);
         Ok(())
     }
     pub fn set_list_size(self, type_name: &str, field_name: &str, list_size: ListSize) -> JsResult<()> {
-        self.field(type_name, field_name)?.list_size = Some(list_size);
+        self.field(type_name, field_name)?.details_mut().list_size = Some(list_size);
         Ok(())
     }
     pub fn set_override(
@@ -2329,16 +2456,16 @@ impl<'s> InterfaceTypeFieldBuilder<'s> {
         label: Option<&str>,
     ) -> JsResult<()> {
         let field = self.field(type_name, field_name)?;
-        field.r#override = Some(r#override.to_string());
-        field.override_label = label.map(str::to_string);
+        field.details_mut().r#override = Some(r#override.to_string());
+        field.details_mut().override_label = label.map(str::to_string);
         Ok(())
     }
     pub fn set_requires(self, type_name: &str, field_name: &str, requires: &str) -> JsResult<()> {
-        self.field(type_name, field_name)?.requires = Some(requires.to_string());
+        self.field(type_name, field_name)?.details_mut().requires = Some(requires.to_string());
         Ok(())
     }
     pub fn set_provides(self, type_name: &str, field_name: &str, provides: &str) -> JsResult<()> {
-        self.field(type_name, field_name)?.provides = Some(provides.to_string());
+        self.field(type_name, field_name)?.details_mut().provides = Some(provides.to_string());
         Ok(())
     }
     pub fn set_shareable(self, type_name: &str, field_name: &str) -> JsResult<()> {
@@ -2346,7 +2473,10 @@ impl<'s> InterfaceTypeFieldBuilder<'s> {
         Ok(())
     }
     pub fn set_tag(self, type_name: &str, field_name: &str, tag: &str) -> JsResult<()> {
-        self.field(type_name, field_name)?.tags.insert(tag.to_string());
+        self.field(type_name, field_name)?
+            .details_mut()
+            .tags
+            .insert(tag.to_string());
         Ok(())
     }
     pub fn set_used(self, type_name: &str, field_name: &str) -> JsResult<()> {
@@ -2365,7 +2495,7 @@ impl<'s> InterfaceTypeFieldBuilder<'s> {
         Ok(())
     }
     pub fn set_deprecated(self, type_name: &str, field_name: &str, reason: Option<&str>) -> JsResult<()> {
-        self.field(type_name, field_name)?.deprecated = Some(Deprecated {
+        self.field(type_name, field_name)?.details_mut().deprecated = Some(Deprecated {
             reason: reason.map(str::to_string),
         });
         Ok(())
@@ -2411,7 +2541,7 @@ impl<'s> InterfaceTypeFieldArgBuilder<'s> {
         arg_name: &str,
         reason: Option<&str>,
     ) -> JsResult<()> {
-        self.arg(type_name, field_name, arg_name)?.deprecated = Some(Deprecated {
+        self.arg(type_name, field_name, arg_name)?.details_mut().deprecated = Some(Deprecated {
             reason: reason.map(str::to_string),
         });
         Ok(())
@@ -2427,7 +2557,10 @@ impl<'s> InterfaceTypeFieldArgBuilder<'s> {
         Ok(())
     }
     pub fn set_tag(self, type_name: &str, field_name: &str, arg_name: &str, tag: &str) -> JsResult<()> {
-        self.arg(type_name, field_name, arg_name)?.tags.insert(tag.to_string());
+        self.arg(type_name, field_name, arg_name)?
+            .details_mut()
+            .tags
+            .insert(tag.to_string());
         Ok(())
     }
     pub fn set_inaccessible(self, type_name: &str, field_name: &str, arg_name: &str) -> JsResult<()> {
@@ -2435,7 +2568,7 @@ impl<'s> InterfaceTypeFieldArgBuilder<'s> {
         Ok(())
     }
     pub fn set_cost(self, type_name: &str, field_name: &str, arg_name: &str, cost: f64) -> JsResult<()> {
-        self.arg(type_name, field_name, arg_name)?.cost = Some(cost);
+        self.arg(type_name, field_name, arg_name)?.details_mut().cost = Some(cost);
         Ok(())
     }
     pub fn set_directive(
@@ -2458,7 +2591,7 @@ impl<'s> InterfaceTypeFieldArgBuilder<'s> {
         arg_name: &str,
         from_context: FromContext,
     ) -> JsResult<()> {
-        self.arg(type_name, field_name, arg_name)?.from_context = Some(from_context);
+        self.arg(type_name, field_name, arg_name)?.details_mut().from_context = Some(from_context);
         Ok(())
     }
 }
@@ -2563,7 +2696,7 @@ impl<'s> InputObjectTypeFieldBuilder<'s> {
         Ok(())
     }
     pub fn set_deprecated(self, type_name: &str, field_name: &str, reason: Option<&str>) -> JsResult<()> {
-        self.field(type_name, field_name)?.deprecated = Some(Deprecated {
+        self.field(type_name, field_name)?.details_mut().deprecated = Some(Deprecated {
             reason: reason.map(str::to_string),
         });
         Ok(())
@@ -2577,7 +2710,10 @@ impl<'s> InputObjectTypeFieldBuilder<'s> {
         Ok(())
     }
     pub fn set_tag(self, type_name: &str, field_name: &str, tag: &str) -> JsResult<()> {
-        self.field(type_name, field_name)?.tags.insert(tag.to_string());
+        self.field(type_name, field_name)?
+            .details_mut()
+            .tags
+            .insert(tag.to_string());
         Ok(())
     }
     pub fn set_directive(self, type_name: &str, field_name: &str, directive: &DirectiveNode) -> JsResult<()> {
@@ -2588,7 +2724,7 @@ impl<'s> InputObjectTypeFieldBuilder<'s> {
         Ok(())
     }
     pub fn set_cost(self, type_name: &str, field_name: &str, cost: f64) -> JsResult<()> {
-        self.field(type_name, field_name)?.cost = Some(cost);
+        self.field(type_name, field_name)?.details_mut().cost = Some(cost);
         Ok(())
     }
 }
@@ -2722,11 +2858,12 @@ impl<'s> EnumTypeValueBuilder<'s> {
         Ok(())
     }
     pub fn set_description(self, type_name: &str, value_name: &str, description: Description) -> JsResult<()> {
-        self.value(type_name, value_name)?.description = Some(description);
+        self.value(type_name, value_name)?.details_mut().description = Some(description);
         Ok(())
     }
     pub fn set_directive(self, type_name: &str, value_name: &str, directive: &DirectiveNode) -> JsResult<()> {
         self.value(type_name, value_name)?
+            .details_mut()
             .ast
             .directives
             .push(directive.clone());
@@ -2737,11 +2874,14 @@ impl<'s> EnumTypeValueBuilder<'s> {
         Ok(())
     }
     pub fn set_tag(self, type_name: &str, value_name: &str, tag: &str) -> JsResult<()> {
-        self.value(type_name, value_name)?.tags.insert(tag.to_string());
+        self.value(type_name, value_name)?
+            .details_mut()
+            .tags
+            .insert(tag.to_string());
         Ok(())
     }
     pub fn set_deprecated(self, type_name: &str, value_name: &str, reason: Option<&str>) -> JsResult<()> {
-        self.value(type_name, value_name)?.deprecated = Some(Deprecated {
+        self.value(type_name, value_name)?.details_mut().deprecated = Some(Deprecated {
             reason: reason.map(str::to_string),
         });
         Ok(())
@@ -2810,13 +2950,10 @@ fn new_argument(arg_name: &str) -> Argument {
         r#type: MISSING.to_string(),
         kind: ArgumentKind::Scalar,
         inaccessible: false,
-        tags: IndexSet::default(),
-        cost: None,
         default_value: None,
-        from_context: None,
         description: None,
-        deprecated: None,
         ast: Ast::default(),
+        details: None,
     }
 }
 
@@ -2831,24 +2968,15 @@ fn new_field(field_name: &str) -> Field {
         inaccessible: false,
         authenticated: false,
         extension: false,
-        policies: Vec::new(),
-        scopes: Vec::new(),
-        cost: None,
-        list_size: None,
         used: false,
         required: false,
         provided: false,
-        r#override: None,
-        override_label: None,
-        provides: None,
-        requires: None,
         shareable: false,
         // shareable: state.version === 'v1.0' ? true : false, // In Fed v1 - it should be true by default, as all fields are shareable by default, even though there's not @shareable directive
-        tags: IndexSet::default(),
         args: IndexMap::default(),
         description: None,
-        deprecated: None,
         ast: Ast::default(),
+        details: None,
     }
 }
 
@@ -2869,7 +2997,7 @@ fn get_or_create_scalar_type<'s>(state: &'s mut SubgraphState, type_name: &str) 
         state,
         type_name,
         || {
-            SubgraphType::Scalar(ScalarType {
+            SubgraphType::Scalar(Box::new(ScalarType {
                 name: type_name.to_string(),
                 tags: IndexSet::default(),
                 inaccessible: false,
@@ -2880,10 +3008,10 @@ fn get_or_create_scalar_type<'s>(state: &'s mut SubgraphState, type_name: &str) 
                 description: None,
                 specified_by: None,
                 ast: Ast::default(),
-            })
+            }))
         },
         |existing| match existing {
-            SubgraphType::Scalar(t) => Some(t),
+            SubgraphType::Scalar(t) => Some(&mut **t),
             _ => None,
         },
         || format!("Expected {type_name} to be a scalar type"),
@@ -2901,7 +3029,7 @@ fn get_or_create_object_type<'s>(
         state,
         type_name,
         || {
-            SubgraphType::Object(ObjectType {
+            SubgraphType::Object(Box::new(ObjectType {
                 name: type_name.to_string(),
                 fields: IndexMap::default(),
                 contexts: IndexSet::default(),
@@ -2922,10 +3050,10 @@ fn get_or_create_object_type<'s>(
                 description: None,
                 deprecated: None,
                 ast: Ast::default(),
-            })
+            }))
         },
         |existing| match existing {
-            SubgraphType::Object(t) => Some(t),
+            SubgraphType::Object(t) => Some(&mut **t),
             _ => None,
         },
         || format!("Expected {type_name} to be an object type"),
@@ -2937,7 +3065,7 @@ fn get_or_create_interface_type<'s>(state: &'s mut SubgraphState, type_name: &st
         state,
         type_name,
         || {
-            SubgraphType::Interface(InterfaceType {
+            SubgraphType::Interface(Box::new(InterfaceType {
                 name: type_name.to_string(),
                 fields: IndexMap::default(),
                 contexts: IndexSet::default(),
@@ -2952,10 +3080,10 @@ fn get_or_create_interface_type<'s>(state: &'s mut SubgraphState, type_name: &st
                 is_interface_object: false,
                 description: None,
                 ast: Ast::default(),
-            })
+            }))
         },
         |existing| match existing {
-            SubgraphType::Interface(t) => Some(t),
+            SubgraphType::Interface(t) => Some(&mut **t),
             _ => None,
         },
         || format!("Expected {type_name} to be an interface type"),
@@ -2970,7 +3098,7 @@ fn get_or_create_input_object_type<'s>(
         state,
         type_name,
         || {
-            SubgraphType::InputObject(InputObjectType {
+            SubgraphType::InputObject(Box::new(InputObjectType {
                 name: type_name.to_string(),
                 fields: IndexMap::default(),
                 extension: false,
@@ -2980,10 +3108,10 @@ fn get_or_create_input_object_type<'s>(
                 description: None,
                 ast: Ast::default(),
                 is_one_of: None,
-            })
+            }))
         },
         |existing| match existing {
-            SubgraphType::InputObject(t) => Some(t),
+            SubgraphType::InputObject(t) => Some(&mut **t),
             _ => None,
         },
         || format!("Expected {type_name} to be an input object type"),
@@ -2995,7 +3123,7 @@ fn get_or_create_enum_type<'s>(state: &'s mut SubgraphState, type_name: &str) ->
         state,
         type_name,
         || {
-            SubgraphType::Enum(EnumType {
+            SubgraphType::Enum(Box::new(EnumType {
                 name: type_name.to_string(),
                 values: IndexMap::default(),
                 inaccessible: false,
@@ -3011,10 +3139,10 @@ fn get_or_create_enum_type<'s>(state: &'s mut SubgraphState, type_name: &str) ->
                 input_type_references: IndexSet::default(),
                 output_type_references: IndexSet::default(),
                 ast: Ast::default(),
-            })
+            }))
         },
         |existing| match existing {
-            SubgraphType::Enum(t) => Some(t),
+            SubgraphType::Enum(t) => Some(&mut **t),
             _ => None,
         },
         || format!("Expected {type_name} to be an enum type"),
@@ -3026,7 +3154,7 @@ fn get_or_create_union_type<'s>(state: &'s mut SubgraphState, type_name: &str) -
         state,
         type_name,
         || {
-            SubgraphType::Union(UnionType {
+            SubgraphType::Union(Box::new(UnionType {
                 name: type_name.to_string(),
                 members: IndexSet::default(),
                 contexts: IndexSet::default(),
@@ -3035,10 +3163,10 @@ fn get_or_create_union_type<'s>(state: &'s mut SubgraphState, type_name: &str) -
                 is_definition: false,
                 description: None,
                 ast: Ast::default(),
-            })
+            }))
         },
         |existing| match existing {
-            SubgraphType::Union(t) => Some(t),
+            SubgraphType::Union(t) => Some(&mut **t),
             _ => None,
         },
         || format!("Expected {type_name} to be a union type"),
@@ -3083,12 +3211,10 @@ fn get_or_create_input_object_field<'s>(
             r#type: MISSING.to_string(),
             kind: ArgumentKind::Scalar,
             inaccessible: false,
-            cost: None,
-            tags: IndexSet::default(),
             default_value: None,
             description: None,
-            deprecated: None,
             ast: Ast::default(),
+            details: None,
         }
     }))
 }
@@ -3100,16 +3226,11 @@ fn get_or_create_enum_value<'s>(
 ) -> JsResult<&'s mut EnumValue> {
     let enum_type = get_or_create_enum_type(state, type_name)?;
 
-    Ok(get_or_insert_with(&mut enum_type.values, enum_value_name, || {
-        EnumValue {
-            name: enum_value_name.to_string(),
-            inaccessible: false,
-            tags: IndexSet::default(),
-            description: None,
-            deprecated: None,
-            ast: Ast::default(),
-        }
-    }))
+    Ok(get_or_insert_with(
+        &mut enum_type.values,
+        enum_value_name,
+        EnumValue::default,
+    ))
 }
 
 fn get_or_create_object_field_argument<'s>(
@@ -3364,7 +3485,7 @@ mod tests {
         assert!(a.used);
         assert_eq!(a.args["x"].r#type, "Int");
         assert_eq!(a.args["x"].kind, ArgumentKind::Scalar);
-        assert_eq!(a.cost, None);
+        assert_eq!(a.details().cost, None);
     }
 
     #[test]
@@ -3394,8 +3515,8 @@ mod tests {
         let id = &foo.fields["id"];
         assert_eq!(id.r#type, "ID!");
         assert!(id.shareable);
-        assert_eq!(id.provides.as_deref(), Some("x"));
-        assert!(id.args["arg"].tags.contains("t"));
+        assert_eq!(id.details().provides.as_deref(), Some("x"));
+        assert!(id.args["arg"].details().tags.contains("t"));
         assert_eq!(
             foo.keys,
             vec![Key {
@@ -3560,19 +3681,19 @@ mod tests {
         let Some(SubgraphType::Object(a)) = b.state.types.get("A") else {
             panic!("A missing");
         };
-        assert_eq!(a.fields["x"].deprecated, Some(Deprecated { reason: None }));
-        assert_eq!(a.fields["x"].r#override.as_deref(), Some("other"));
-        assert_eq!(a.fields["x"].override_label, None);
+        assert_eq!(a.fields["x"].details().deprecated, Some(Deprecated { reason: None }));
+        assert_eq!(a.fields["x"].details().r#override.as_deref(), Some("other"));
+        assert_eq!(a.fields["x"].details().override_label, None);
         let Some(SubgraphType::Interface(i)) = b.state.types.get("I") else {
             panic!("I missing");
         };
         assert_eq!(
-            i.fields["x"].deprecated,
+            i.fields["x"].details().deprecated,
             Some(Deprecated {
                 reason: Some("why".to_string())
             })
         );
-        assert_eq!(i.fields["x"].override_label.as_deref(), Some("percent(5)"));
+        assert_eq!(i.fields["x"].details().override_label.as_deref(), Some("percent(5)"));
     }
 
     #[test]

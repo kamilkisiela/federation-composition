@@ -567,7 +567,7 @@ pub fn is_external(graph: &Graph<'_>, edge: EdgeId) -> bool {
         return false;
     };
 
-    if !field_state_in_graph.external {
+    if !field_state_in_graph.external() {
         return false;
     }
 

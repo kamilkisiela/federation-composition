@@ -2,4 +2,4 @@
 //! See `graphql_core::collections` (the same types, so maps cross the crate boundary as is).
 //! Never use `indexmap::IndexMap` directly or a std `HashMap`/`HashSet`.
 
-pub use graphql_core::collections::{IndexMap, IndexSet};
+pub use graphql_core::collections::{AHashBuilder, IndexMap, IndexSet};

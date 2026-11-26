@@ -57,7 +57,7 @@ impl SupergraphStateUpdate {
                     .object_types
                     .get_mut(&type_name)
                     .and_then(|t| t.fields.get_mut(field_name.as_str()))
-                    .and_then(|f| f.list_size.as_mut())
+                    .and_then(|f| f.details_mut().list_size.as_mut())
                 {
                     list_size.slicing_arguments = Some(slicing_arguments);
                 }

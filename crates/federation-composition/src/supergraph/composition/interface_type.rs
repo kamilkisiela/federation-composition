@@ -54,8 +54,8 @@ impl InterfaceTypeBuilder {
                     continue;
                 };
                 // When a field comes from an interface object, we need to look for the implementation
-                field.scopes = merge_scope_policies(&field.scopes, &implementor_field.scopes);
-                field.policies = merge_scope_policies(&field.policies, &implementor_field.policies);
+                field.scopes = merge_scope_policies(&field.scopes, &implementor_field.details().scopes);
+                field.policies = merge_scope_policies(&field.policies, &implementor_field.details().policies);
                 if implementor_field.authenticated {
                     field.authenticated = true;
                 }
@@ -139,7 +139,7 @@ impl<'a> TypeBuilder<'a, InterfaceType, InterfaceTypeState> for InterfaceTypeBui
         for field in ty.fields.values() {
             let field_state = get_or_create_interface_field(interface_type_state, &field.name, &field.r#type);
 
-            for tag in &field.tags {
+            for tag in &field.details().tags {
                 field_state.tags.insert(tag.clone());
             }
 
@@ -161,21 +161,21 @@ impl<'a> TypeBuilder<'a, InterfaceType, InterfaceTypeState> for InterfaceTypeBui
             }
 
             // NOTE(port): `if (field.policies)` / `if (field.scopes)` test arrays: always truthy.
-            field_state.policies = merge_scope_policies(&field_state.policies, &field.policies);
+            field_state.policies = merge_scope_policies(&field_state.policies, &field.details().policies);
 
-            field_state.scopes = merge_scope_policies(&field_state.scopes, &field.scopes);
+            field_state.scopes = merge_scope_policies(&field_state.scopes, &field.details().scopes);
 
-            if let Some(cost) = field.cost {
+            if let Some(cost) = field.details().cost {
                 field_state.cost = Some(math_max(cost, field_state.cost));
             }
 
-            if let Some(list_size) = &field.list_size {
+            if let Some(list_size) = &field.details().list_size {
                 field_state.list_size = Some(merge_list_size(field_state.list_size.as_ref(), list_size));
             }
 
             // First deprecation wins
-            if field.deprecated.is_some() && field_state.deprecated.is_none() {
-                field_state.deprecated = field.deprecated.clone();
+            if field.details().deprecated.is_some() && field_state.deprecated.is_none() {
+                field_state.deprecated = field.details().deprecated.clone();
             }
 
             // First description wins
@@ -197,16 +197,16 @@ impl<'a> TypeBuilder<'a, InterfaceType, InterfaceTypeState> for InterfaceTypeBui
                 graph.id.clone(),
                 FieldStateInGraph {
                     r#type: field.r#type.clone(),
-                    r#override: field.r#override.clone(),
-                    override_label: field.override_label.clone(),
-                    provides: field.provides.clone(),
-                    requires: field.requires.clone(),
+                    r#override: field.details().r#override.clone(),
+                    override_label: field.details().override_label.clone(),
+                    provides: field.details().provides.clone(),
+                    requires: field.details().requires.clone(),
                     version: graph.version,
                     external: field.external,
                     shareable: field.shareable,
                     authenticated: field.authenticated,
-                    policies: field.policies.clone(),
-                    scopes: field.scopes.clone(),
+                    policies: field.details().policies.clone(),
+                    scopes: field.details().scopes.clone(),
                     used_as_key,
                 },
             );
@@ -214,7 +214,7 @@ impl<'a> TypeBuilder<'a, InterfaceType, InterfaceTypeState> for InterfaceTypeBui
             for arg in field.args.values() {
                 let arg_state = get_or_create_arg(field_state, &arg.name, &arg.r#type, arg.kind);
 
-                for tag in &arg.tags {
+                for tag in &arg.details().tags {
                     arg_state.tags.insert(tag.clone());
                 }
 
@@ -222,8 +222,8 @@ impl<'a> TypeBuilder<'a, InterfaceType, InterfaceTypeState> for InterfaceTypeBui
                     arg_state.r#type = arg.r#type.clone();
                 }
 
-                if arg.deprecated.is_some() && arg_state.deprecated.is_none() {
-                    arg_state.deprecated = arg.deprecated.clone();
+                if arg.details().deprecated.is_some() && arg_state.deprecated.is_none() {
+                    arg_state.deprecated = arg.details().deprecated.clone();
                 }
 
                 // First description wins
@@ -236,11 +236,11 @@ impl<'a> TypeBuilder<'a, InterfaceType, InterfaceTypeState> for InterfaceTypeBui
                     arg_state.default_value = arg.default_value.clone();
                 }
 
-                if arg.from_context.is_some() {
-                    arg_state.from_context = arg.from_context.clone();
+                if arg.details().from_context.is_some() {
+                    arg_state.from_context = arg.details().from_context.clone();
                 }
 
-                if let Some(cost) = arg.cost {
+                if let Some(cost) = arg.details().cost {
                     arg_state.cost = Some(math_max(cost, arg_state.cost));
                 }
 
@@ -256,7 +256,7 @@ impl<'a> TypeBuilder<'a, InterfaceType, InterfaceTypeState> for InterfaceTypeBui
                         r#type: arg.r#type.clone(),
                         kind: arg.kind,
                         default_value: arg.default_value.clone(),
-                        from_context: arg.from_context.clone(),
+                        from_context: arg.details().from_context.clone(),
                         version: graph.version,
                     },
                 );

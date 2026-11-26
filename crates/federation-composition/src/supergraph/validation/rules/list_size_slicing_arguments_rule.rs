@@ -49,7 +49,7 @@ impl<'s> SupergraphVisitor<'s> for ListSizeSlicingArgumentsRule<'s> {
         let result = ensure_slicing_arguments_exist(
             &object_state.name,
             field_state.name,
-            field_state.list_size.as_ref(),
+            field_state.details().list_size.as_ref(),
             |arg_name| field_state.args.get(arg_name).map(|a| a.by_graph.len()),
             field_state.by_graph.len(),
         )?;
@@ -111,7 +111,7 @@ impl<'s> SupergraphVisitor<'s> for ListSizeSlicingArgumentsRule<'s> {
                 continue;
             };
 
-            let Some(implementor_list_size) = implementor_field.list_size.as_ref() else {
+            let Some(implementor_list_size) = implementor_field.details().list_size.as_ref() else {
                 continue;
             };
 

@@ -46,14 +46,14 @@ impl<'s> SupergraphVisitor<'s> for ExternalTypeMismatchRule {
                 .federation
                 .version;
             let is_external = if graph_version == FederationVersion::V1_0 {
-                field.external && {
+                field.external() && {
                     let meta = object_type_state.by_graph.get(graph_id).ok_or_else(|| {
                         JsError::type_error("Cannot read properties of undefined (reading 'extensionType')")
                     })?;
                     is_federation_extension(meta, graph_version)
                 }
             } else {
-                field.external
+                field.external()
             };
             if !is_external {
                 graphs_with_equal_type.push(graph_id);
@@ -61,12 +61,12 @@ impl<'s> SupergraphVisitor<'s> for ExternalTypeMismatchRule {
                 continue;
             }
 
-            if field.r#type == field_state.r#type {
+            if field.r#type() == field_state.r#type {
                 graphs_with_equal_type.push(graph_id);
                 continue;
             }
 
-            group_by_type.entry(field.r#type).or_default().push(graph_id);
+            group_by_type.entry(field.r#type()).or_default().push(graph_id);
         }
 
         if !group_by_type.is_empty() && !graphs_with_equal_type.is_empty() {

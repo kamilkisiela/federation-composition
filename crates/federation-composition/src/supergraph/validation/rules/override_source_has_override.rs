@@ -28,7 +28,7 @@ impl<'s> SupergraphVisitor<'s> for OverrideSourceHasOverrideRule {
         object_type_state: &'s ObjectTypeState,
         field_state: &'s ObjectTypeFieldState,
     ) -> JsResult<()> {
-        if field_state.r#override.is_none() {
+        if field_state.details().r#override.is_none() {
             return Ok(());
         }
 
@@ -42,7 +42,7 @@ impl<'s> SupergraphVisitor<'s> for OverrideSourceHasOverrideRule {
         for (graph, field_state_in_graph) in &graphs_with_override {
             // find any circular references
             let mut visited_graphs: IndexSet<String> = IndexSet::default();
-            let override_name = field_state_in_graph.r#override.expect("filtered by onlyWithOverride");
+            let override_name = field_state_in_graph.r#override().expect("filtered by onlyWithOverride");
             let mut override_value = cx.graph_name_to_id(override_name);
 
             // `while (overrideValue)`: graph ids are strings; `""` is falsy.
@@ -66,7 +66,7 @@ impl<'s> SupergraphVisitor<'s> for OverrideSourceHasOverrideRule {
                 };
 
                 // `if (!graphFromOverride.override) break;`
-                let Some(next_override) = graph_from_override.r#override.filter(|o| !o.is_empty()) else {
+                let Some(next_override) = graph_from_override.r#override().filter(|o| !o.is_empty()) else {
                     break;
                 };
 
@@ -80,5 +80,5 @@ impl<'s> SupergraphVisitor<'s> for OverrideSourceHasOverrideRule {
 
 /// `onlyWithOverride(entry)`: entries whose `override` is set (`!== null`).
 fn only_with_override(entry: &(&str, &FieldStateInGraph)) -> bool {
-    entry.1.r#override.is_some()
+    entry.1.r#override().is_some()
 }

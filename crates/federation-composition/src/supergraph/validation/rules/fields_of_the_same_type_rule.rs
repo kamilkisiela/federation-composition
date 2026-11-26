@@ -144,7 +144,7 @@ impl<'s> SupergraphVisitor<'s> for FieldsOfTheSameTypeRule {
             field_state
                 .by_graph
                 .values()
-                .map(|field| object_field_output_type(field_state.r#type, field.r#type)),
+                .map(|field| object_field_output_type(field_state.r#type, field.r#type())),
         ) {
             return Ok(());
         }
@@ -154,7 +154,7 @@ impl<'s> SupergraphVisitor<'s> for FieldsOfTheSameTypeRule {
         let mut type_name_to_possible_type_names: IndexMap<Cow<'s, str>, IndexSet<String>> = IndexMap::default();
 
         for (graph_name, field) in &field_state.by_graph {
-            let type_name = strip_all_modifiers(field.r#type);
+            let type_name = strip_all_modifiers(field.r#type());
             let type_state = cx
                 .subgraph_states
                 .get(graph_name)
@@ -176,7 +176,7 @@ impl<'s> SupergraphVisitor<'s> for FieldsOfTheSameTypeRule {
                 _ => {}
             }
 
-            let field_output_type = object_field_output_type(field_state.r#type, field.r#type);
+            let field_output_type = object_field_output_type(field_state.r#type, field.r#type());
 
             type_to_graphs.entry(field_output_type).or_default().push(graph_name);
         }

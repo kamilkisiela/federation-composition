@@ -1,6 +1,8 @@
 //! Port of `src/supergraph/composition/object-type.ts`.
 
-use crate::utils::collections::{IndexMap, IndexSet};
+use std::borrow::Cow;
+
+use crate::utils::collections::{AHashBuilder, IndexMap, IndexSet};
 use graphql_core::{Definition, Selection, SelectionSet};
 
 use super::ast::{
@@ -16,7 +18,7 @@ use super::interface_type::{
 use crate::specifications::federation::FederationVersion;
 use crate::subgraph::helpers::parse_fields;
 use crate::subgraph::state::{
-    ArgumentKind, Ast, Deprecated, Description, ExtensionType, FromContext, ListSize, ObjectType,
+    ArgumentKind, Ast, Deprecated, Description, ExtensionType, Field, FromContext, ListSize, ObjectType,
 };
 use crate::supergraph::state::{SubgraphStates, SupergraphState};
 use crate::utils::auth::merge_scope_policies;
@@ -107,8 +109,15 @@ impl ObjectTypeBuilder {
                 // Merge auth directives from interface object field with the object field
                 // Check REF_AUTH_INTERFACE_OBJECT_SHAREABLE in tests
                 if let Some(field_state) = object_type.fields.get_mut(interface_field_name.as_str()) {
-                    field_state.scopes = merge_scope_policies(&field_state.scopes, &interface_field.scopes);
-                    field_state.policies = merge_scope_policies(&field_state.policies, &interface_field.policies);
+                    // Merging with no scopes or policies keeps the field's own.
+                    if !interface_field.scopes.is_empty() {
+                        let details = field_state.details_mut();
+                        details.scopes = merge_scope_policies(&details.scopes, &interface_field.scopes);
+                    }
+                    if !interface_field.policies.is_empty() {
+                        let details = field_state.details_mut();
+                        details.policies = merge_scope_policies(&details.policies, &interface_field.policies);
+                    }
                     if interface_field.authenticated {
                         field_state.authenticated = true;
                     }
@@ -232,8 +241,8 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
         for field in ty.fields.values() {
             let field_state = get_or_create_field(object_type_state, &field.name, &field.r#type);
 
-            for tag in &field.tags {
-                field_state.tags.insert(tag.clone());
+            for tag in &field.details().tags {
+                field_state.details_mut().tags.insert(tag.clone());
             }
 
             let used_as_key = ty.fields_used_as_keys.contains(&field.name);
@@ -289,16 +298,25 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
             }
 
             // NOTE(port): `if (field.policies)` / `if (field.scopes)` test arrays: always truthy.
-            field_state.policies = merge_scope_policies(&field_state.policies, &field.policies);
-
-            field_state.scopes = merge_scope_policies(&field_state.scopes, &field.scopes);
-
-            if let Some(cost) = field.cost {
-                field_state.cost = Some(math_max(cost, field_state.cost));
+            // Merging with none keeps the state's own, so only fields that have some merge.
+            if !field.details().policies.is_empty() {
+                let details = field_state.details_mut();
+                details.policies = merge_scope_policies(&details.policies, &field.details().policies);
             }
 
-            if let Some(list_size) = &field.list_size {
-                field_state.list_size = Some(merge_list_size(field_state.list_size.as_ref(), list_size));
+            if !field.details().scopes.is_empty() {
+                let details = field_state.details_mut();
+                details.scopes = merge_scope_policies(&details.scopes, &field.details().scopes);
+            }
+
+            if let Some(cost) = field.details().cost {
+                let details = field_state.details_mut();
+                details.cost = Some(math_max(cost, details.cost));
+            }
+
+            if let Some(list_size) = &field.details().list_size {
+                let details = field_state.details_mut();
+                details.list_size = Some(merge_list_size(details.list_size.as_ref(), list_size));
             }
 
             // first wins BUT a graph overriding a field of an entity type (that provided the description) is an exception (it's applied at the supergraph level REF_1)
@@ -306,17 +324,17 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                 field_state.description = field.description.as_ref();
             }
 
-            if truthy(&field.r#override) {
-                field_state.r#override = field.r#override.clone();
+            if truthy(&field.details().r#override) {
+                field_state.details_mut().r#override = field.details().r#override.clone();
             }
 
-            if truthy(&field.override_label) {
-                field_state.override_label = field.override_label.clone();
+            if truthy(&field.details().override_label) {
+                field_state.details_mut().override_label = field.details().override_label.clone();
             }
 
             // First deprecation wins
-            if field.deprecated.is_some() && field_state.deprecated.is_none() {
-                field_state.deprecated = field.deprecated.clone();
+            if field.details().deprecated.is_some() && field_state.details().deprecated.is_none() {
+                field_state.details_mut().deprecated = field.details().deprecated.clone();
             }
 
             for directive in &field.ast.directives {
@@ -326,22 +344,9 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
             field_state.by_graph.insert(
                 graph.id.clone(),
                 FieldStateInGraph {
-                    r#type: &field.r#type,
-                    external: field.external,
-                    inaccessible: field.inaccessible,
-                    description: field.description.as_ref(),
-                    r#override: field.r#override.as_deref(),
-                    override_label: field.override_label.as_deref(),
-                    provides: field.provides.clone(),
-                    requires: field.requires.clone(),
-                    provided: field.provided,
-                    required: field.required,
-                    shareable: field.shareable,
-                    extension: field.extension,
-                    authenticated: field.authenticated,
-                    policies: &field.policies,
-                    scopes: &field.scopes,
-                    used: field.used,
+                    field,
+                    provides: field.details().provides.as_deref().map(Cow::Borrowed),
+                    requires: field.details().requires.as_deref().map(Cow::Borrowed),
                     used_as_key,
                     version: graph.version,
                 },
@@ -350,7 +355,7 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
             for arg in field.args.values() {
                 let arg_state = get_or_create_arg(field_state, &arg.name, &arg.r#type, arg.kind);
 
-                for tag in &arg.tags {
+                for tag in &arg.details().tags {
                     arg_state.tags.insert(tag.clone());
                 }
 
@@ -367,8 +372,8 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                     arg_state.description = arg.description.clone();
                 }
 
-                if arg.deprecated.is_some() && arg_state.deprecated.is_none() {
-                    arg_state.deprecated = arg.deprecated.clone();
+                if arg.details().deprecated.is_some() && arg_state.deprecated.is_none() {
+                    arg_state.deprecated = arg.details().deprecated.clone();
                 }
 
                 for directive in &arg.ast.directives {
@@ -380,11 +385,11 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                     arg_state.default_value = arg.default_value.clone();
                 }
 
-                if arg.from_context.is_some() {
-                    arg_state.from_context = arg.from_context.clone();
+                if arg.details().from_context.is_some() {
+                    arg_state.from_context = arg.details().from_context.clone();
                 }
 
-                if let Some(cost) = arg.cost {
+                if let Some(cost) = arg.details().cost {
                     arg_state.cost = Some(math_max(cost, arg_state.cost));
                 }
 
@@ -397,7 +402,7 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                         kind: arg.kind,
                         inaccessible: arg.inaccessible,
                         default_value: arg.default_value.clone(),
-                        from_context: arg.from_context.clone(),
+                        from_context: arg.details().from_context.clone(),
                         version: graph.version,
                     },
                 );
@@ -511,15 +516,15 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                 }
 
                 // check if a field was overridden
-                if !truthy(&field.r#override) {
+                if !truthy(&field.details().r#override) {
                     continue;
                 }
 
                 for field_in_graph in field.by_graph.values() {
                     // if a field is shareable, ignore the description (I don't know why...don't ask me)
-                    if truthy(&field_in_graph.r#override) && !field_in_graph.shareable {
+                    if truthy(&field_in_graph.r#override()) && !field_in_graph.shareable() {
                         // use description from that graph
-                        corrected_descriptions.insert(field.name, field_in_graph.description.cloned());
+                        corrected_descriptions.insert(field.name, field_in_graph.description().cloned());
                     }
                 }
             }
@@ -556,14 +561,14 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                     requires_usage_index,
                     field_coordinate,
                     graph_id,
-                    meta.required,
+                    meta.required(),
                 )
             };
             let has_only_overridden_requires_usage = |graph_id: &str| {
                 has_only_overridden_requires_dependency(requires_usage_index, field_coordinate, graph_id)
             };
 
-            let has_different_output_type = field_in_graphs.iter().any(|(_, meta)| meta.r#type != field.r#type);
+            let has_different_output_type = field_in_graphs.iter().any(|(_, meta)| meta.r#type() != field.r#type);
             let is_defined_everywhere = field.by_graph.len()
                 == (if is_query {
                     graphs.len()
@@ -575,17 +580,17 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
             let mut differences_between_graphs = DifferencesBetweenGraphs::default();
 
             for (graph_id, meta) in &field_in_graphs {
-                if meta.external {
+                if meta.external() {
                     differences_between_graphs.external = if field.used_as_key {
                         !cx.object_type_in_graph(graph_id).extension
                     } else {
                         true
                     };
                 }
-                if meta.r#override.is_some() {
+                if meta.r#override().is_some() {
                     differences_between_graphs.r#override = true;
                 }
-                if meta.override_label.is_some() {
+                if meta.override_label().is_some() {
                     differences_between_graphs.override_label = true;
                 }
                 if meta.provides.is_some() {
@@ -594,7 +599,7 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                 if meta.requires.is_some() {
                     differences_between_graphs.requires = true;
                 }
-                if meta.r#type != field.r#type {
+                if meta.r#type() != field.r#type {
                     differences_between_graphs.r#type = true;
                 }
                 if field
@@ -654,10 +659,10 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                 let override_label = override_labels.get(graph_id);
 
                 if mode == OverrideJoinFieldMode::Query {
-                    let has_explicit_override = meta.r#override.is_some();
+                    let has_explicit_override = meta.r#override().is_some();
                     let has_override_label = override_label.is_some_and(|l| !l.is_empty());
                     let is_shareable_source_graph =
-                        meta.shareable && overridden_graphs.is_some_and(|g| !g.contains(graph_id));
+                        meta.shareable() && overridden_graphs.is_some_and(|g| !g.contains(graph_id));
 
                     return has_explicit_override || has_override_label || is_shareable_source_graph;
                 }
@@ -667,7 +672,7 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                     .expect("graphJoinFieldState has every graph of the field");
                 let is_overridden_source_graph = overridden_graphs.is_some_and(|g| g.contains(graph_id));
                 let needs_override_label =
-                    meta.override_label.is_some() || override_label.is_some_and(|l| !l.is_empty());
+                    meta.override_label().is_some() || override_label.is_some_and(|l| !l.is_empty());
                 let needs_external_for_required = graph_state.external_on_join_field && graph_state.is_required;
                 let has_used_overridden = graph_state.used_overridden
                     || (is_overridden_source_graph && graph_state.is_required && !graph_state.external_on_join_field);
@@ -704,12 +709,12 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                                 field,
                                 differences_between_graphs.r#type,
                                 if mode == OverrideJoinFieldMode::Query {
-                                    meta.override_label.map(str::to_string)
+                                    meta.override_label().map(str::to_string)
                                 } else {
                                     override_labels.get(&**graph_id).cloned()
                                 },
                                 if mode == OverrideJoinFieldMode::Query {
-                                    Some(meta.external)
+                                    Some(meta.external())
                                 } else if graph_state.external_on_join_field {
                                     Some(true)
                                 } else {
@@ -726,13 +731,13 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
 
                 if
                 // a field is external
-                field_in_graph.external
+                field_in_graph.external()
                     // it's not used as a key
                     && !field_in_graph.used_as_key
                     // it's not part of any @requires(fields:)
                     && !is_effectively_required(graph_id, field_in_graph)
                     // it's not part of any @provides(fields:)
-                    && !field_in_graph.provided
+                    && !field_in_graph.provided()
                     // it's not part of any @override(from:) and it's not used by any interface
                     && !is_used_overridden_in_graph(
                         field,
@@ -770,7 +775,7 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                             .map(|(graph_id, meta)| JoinFieldAst {
                                 graph: Some(graph_id.to_string()),
                                 provides: if differences_between_graphs.provides {
-                                    meta.provides.clone()
+                                    meta.provides.as_deref().map(str::to_string)
                                 } else {
                                     None
                                 },
@@ -835,7 +840,7 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                 }
             }
 
-            let field_cost = match field.cost {
+            let field_cost = match field.details().cost {
                 Some(cost) => Some(CostAst {
                     cost,
                     directive_name: ensure_value(
@@ -845,7 +850,7 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                 }),
                 None => None,
             };
-            let field_list_size = match &field.list_size {
+            let field_list_size = match &field.details().list_size {
                 Some(list_size) => Some(list_size_ast(
                     list_size,
                     ensure_value(
@@ -909,11 +914,11 @@ impl<'a> TypeBuilder<'a, ObjectType, ObjectTypeState<'a>> for ObjectTypeBuilder 
                 r#type: field.r#type.to_string(),
                 inaccessible: field.inaccessible,
                 authenticated: field.authenticated,
-                policies: field.policies.clone(),
-                scopes: field.scopes.clone(),
-                tags: field.tags.iter().cloned().collect(),
+                policies: field.details().policies.clone(),
+                scopes: field.details().scopes.clone(),
+                tags: field.details().tags.iter().cloned().collect(),
                 description,
-                deprecated: field.deprecated.clone(),
+                deprecated: field.details().deprecated.clone(),
                 cost: field_cost,
                 list_size: field_list_size,
                 ast: convert_to_const(&field.ast.directives),
@@ -1172,7 +1177,7 @@ impl ObjectComposeCx<'_> {
         has_only_overridden_requires_usage: bool,
     ) -> bool {
         // Decide whether `@join__field(..., external: true)` should be emitted
-        if !field_state_in_graph.external {
+        if !field_state_in_graph.external() {
             return false;
         }
 
@@ -1182,7 +1187,7 @@ impl ObjectComposeCx<'_> {
             return false;
         }
 
-        if field_state_in_graph.provided {
+        if field_state_in_graph.provided() {
             return true;
         }
 
@@ -1201,7 +1206,7 @@ impl ObjectComposeCx<'_> {
         is_required_or_provided: bool,
         used_overridden: bool,
     ) -> bool {
-        field_state_in_graph.external
+        field_state_in_graph.external()
             && !field_state_in_graph.used_as_key
             && !is_required_or_provided
             && !used_overridden
@@ -1221,12 +1226,12 @@ impl ObjectComposeCx<'_> {
             .filter_map(|(graph_id, meta)| {
                 let graph_id: &str = graph_id;
                 let r#type = if has_different_output_type {
-                    Some(meta.r#type)
+                    Some(meta.r#type())
                 } else {
                     None
                 };
-                let r#override = meta.r#override;
-                let override_label = meta.override_label;
+                let r#override = meta.r#override();
+                let override_label = meta.override_label();
                 let used_overridden = is_used_overridden_in_graph(
                     field,
                     meta,
@@ -1242,8 +1247,8 @@ impl ObjectComposeCx<'_> {
                     field,
                     has_only_overridden_requires_usage(graph_id),
                 );
-                let provides = meta.provides.clone();
-                let requires = meta.requires.clone();
+                let provides = meta.provides.as_deref().map(str::to_string);
+                let requires = meta.requires.as_deref().map(str::to_string);
 
                 let context_arguments = self.build_context_arguments(graph_id, field);
 
@@ -1253,7 +1258,7 @@ impl ObjectComposeCx<'_> {
                     || truthy(&requires)
                     || !context_arguments.is_empty()
                     || used_overridden;
-                let is_required_or_provided = meta.provided || is_effectively_required(graph_id, meta);
+                let is_required_or_provided = meta.provided() || is_effectively_required(graph_id, meta);
 
                 if self.should_drop_fed_v1_unused_external_join_field(
                     graph_id,
@@ -1273,7 +1278,7 @@ impl ObjectComposeCx<'_> {
                     return None;
                 }
 
-                if meta.external
+                if meta.external()
                     && !external
                     && has_only_overridden_requires_usage(graph_id)
                     && !has_any_join_field_metadata
@@ -1310,7 +1315,7 @@ impl ObjectComposeCx<'_> {
         let mut overridden_graphs: IndexSet<String> = IndexSet::default();
 
         for (to_graph_id, meta) in field_in_graphs {
-            let Some(override_name) = meta.r#override.filter(|o| !o.is_empty()) else {
+            let Some(override_name) = meta.r#override().filter(|o| !o.is_empty()) else {
                 continue;
             };
 
@@ -1320,7 +1325,7 @@ impl ObjectComposeCx<'_> {
 
             overridden_graphs.insert(from_graph_id.clone());
 
-            if let Some(override_label) = meta.override_label.filter(|l| !l.is_empty()) {
+            if let Some(override_label) = meta.override_label().filter(|l| !l.is_empty()) {
                 override_labels.insert(from_graph_id, override_label.to_string());
                 override_labels.insert((*to_graph_id).to_string(), override_label.to_string());
             }
@@ -1347,7 +1352,7 @@ impl ObjectComposeCx<'_> {
 
         JoinFieldAst {
             graph: Some(graph_id.to_string()),
-            r#override: meta.r#override.map(str::to_string),
+            r#override: meta.r#override().map(str::to_string),
             override_label,
             used_overridden: Some(used_overridden.unwrap_or_else(|| {
                 is_used_overridden_in_graph(
@@ -1359,13 +1364,13 @@ impl ObjectComposeCx<'_> {
                 )
             })),
             r#type: if has_different_output_type {
-                Some(meta.r#type.to_string())
+                Some(meta.r#type().to_string())
             } else {
                 None
             },
             external,
-            provides: meta.provides.clone(),
-            requires: meta.requires.clone(),
+            provides: meta.provides.as_deref().map(str::to_string),
+            requires: meta.requires.as_deref().map(str::to_string),
             context_arguments: if context_arguments.is_empty() {
                 None
             } else {
@@ -1422,8 +1427,9 @@ fn is_used_overridden_in_graph(
 ) -> bool {
     let interface_graphs_for_field = interface_field_graphs_by_field_name.get(field.name);
     let is_interface_field_in_graph = interface_graphs_for_field.is_some_and(|g| g.contains(graph_id));
-    let is_used_as_non_external_key = field_state_in_graph.used_as_key && !field_state_in_graph.external;
+    let is_used_as_non_external_key = field_state_in_graph.used_as_key && !field_state_in_graph.external();
     let is_overridden = field
+        .details()
         .r#override
         .as_deref()
         .filter(|o| !o.is_empty())
@@ -1525,13 +1531,13 @@ fn should_keep_object_type_join_type_in_graph(input: ShouldKeepObjectTypeJoinTyp
             requires_usage_index,
             field_coordinate,
             graph_id,
-            field_in_graph.required,
+            field_in_graph.required(),
         );
         let has_only_overridden_requires =
             has_only_overridden_requires_dependency(requires_usage_index, field_coordinate, graph_id);
 
-        if !field_in_graph.external
-            || field_in_graph.provided
+        if !field_in_graph.external()
+            || field_in_graph.provided()
             || is_effectively_required
             || (object_type_in_graph.extension && !has_only_overridden_requires)
             || is_used_overridden_in_graph(
@@ -1554,7 +1560,7 @@ fn collect_overridden_graphs_by_field(field: &ObjectTypeFieldState, helpers: Com
     let mut overridden_graphs = IndexSet::default();
 
     for meta in field.by_graph.values() {
-        let Some(override_name) = meta.r#override.filter(|o| !o.is_empty()) else {
+        let Some(override_name) = meta.r#override().filter(|o| !o.is_empty()) else {
             continue;
         };
 
@@ -1714,24 +1720,61 @@ pub struct ObjectTypeState<'a> {
 pub struct ObjectTypeFieldState<'a> {
     pub name: &'a str,
     pub r#type: &'a str,
-    pub tags: IndexSet<String>,
     pub inaccessible: bool,
     pub is_leaf: bool,
     pub authenticated: bool,
+    pub used_as_key: bool,
+    pub by_graph: MapByGraph<FieldStateInGraph<'a>>,
+    pub args: IndexMap<String, ObjectTypeFieldArgState>,
+    pub description: Option<&'a Description>,
+    pub ast: Ast,
+    /// `internal.seenNonExternal`.
+    pub internal_seen_non_external: bool,
+    pub(crate) details: Option<Box<ObjectTypeFieldDetails>>,
+}
+
+/// The parts of an [`ObjectTypeFieldState`] most fields do not set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectTypeFieldDetails {
+    pub tags: IndexSet<String>,
     pub policies: Vec<Vec<String>>,
     pub scopes: Vec<Vec<String>>,
     pub cost: Option<f64>,
     pub list_size: Option<ListSize>,
-    pub used_as_key: bool,
     pub r#override: Option<String>,
     pub override_label: Option<String>,
-    pub by_graph: MapByGraph<FieldStateInGraph<'a>>,
-    pub args: IndexMap<String, ObjectTypeFieldArgState>,
-    pub description: Option<&'a Description>,
     pub deprecated: Option<Deprecated>,
-    pub ast: Ast,
-    /// `internal.seenNonExternal`.
-    pub internal_seen_non_external: bool,
+}
+
+impl ObjectTypeFieldDetails {
+    const EMPTY: ObjectTypeFieldDetails = ObjectTypeFieldDetails {
+        tags: IndexSet::with_hasher(AHashBuilder),
+        policies: Vec::new(),
+        scopes: Vec::new(),
+        cost: None,
+        list_size: None,
+        r#override: None,
+        override_label: None,
+        deprecated: None,
+    };
+}
+
+impl Default for ObjectTypeFieldDetails {
+    fn default() -> Self {
+        ObjectTypeFieldDetails::EMPTY
+    }
+}
+
+impl ObjectTypeFieldState<'_> {
+    /// The rarely set parts, empty when none is set.
+    pub fn details(&self) -> &ObjectTypeFieldDetails {
+        static EMPTY: ObjectTypeFieldDetails = ObjectTypeFieldDetails::EMPTY;
+        self.details.as_deref().unwrap_or(&EMPTY)
+    }
+
+    pub fn details_mut(&mut self) -> &mut ObjectTypeFieldDetails {
+        self.details.get_or_insert_default()
+    }
 }
 
 /// `ObjectTypeFieldArgState`.
@@ -1769,27 +1812,49 @@ pub struct ObjectTypeStateInGraph<'a> {
     pub version: FederationVersion,
 }
 
-/// `FieldStateInGraph` (object fields).
+/// `FieldStateInGraph` (object fields): the subgraph's field, with whether the field is used as
+/// a key, the subgraph's federation version, and `@provides`/`@requires`, which the supergraph
+/// state rewrites (borrowed from the field until then).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldStateInGraph<'a> {
-    pub r#type: &'a str,
-    pub external: bool,
-    pub description: Option<&'a Description>,
-    pub inaccessible: bool,
-    pub used: bool,
-    pub r#override: Option<&'a str>,
-    pub override_label: Option<&'a str>,
-    pub provides: Option<String>,
-    pub requires: Option<String>,
-    pub provided: bool,
-    pub required: bool,
-    pub authenticated: bool,
-    pub policies: &'a [Vec<String>],
-    pub scopes: &'a [Vec<String>],
-    pub shareable: bool,
+    pub field: &'a Field,
+    pub provides: Option<Cow<'a, str>>,
+    pub requires: Option<Cow<'a, str>>,
     pub used_as_key: bool,
-    pub extension: bool,
     pub version: FederationVersion,
+}
+
+impl<'a> FieldStateInGraph<'a> {
+    pub fn r#type(&self) -> &'a str {
+        &self.field.r#type
+    }
+    pub fn external(&self) -> bool {
+        self.field.external
+    }
+    pub fn description(&self) -> Option<&'a Description> {
+        self.field.description.as_ref()
+    }
+    pub fn used(&self) -> bool {
+        self.field.used
+    }
+    pub fn r#override(&self) -> Option<&'a str> {
+        self.field.details().r#override.as_deref()
+    }
+    pub fn override_label(&self) -> Option<&'a str> {
+        self.field.details().override_label.as_deref()
+    }
+    pub fn provided(&self) -> bool {
+        self.field.provided
+    }
+    pub fn required(&self) -> bool {
+        self.field.required
+    }
+    pub fn shareable(&self) -> bool {
+        self.field.shareable
+    }
+    pub fn extension(&self) -> bool {
+        self.field.extension
+    }
 }
 
 /// `ArgStateInGraph` (object field arguments).
@@ -1835,22 +1900,15 @@ fn get_or_create_field<'s, 'a>(
         name: field_name,
         r#type: field_type,
         is_leaf: false,
-        tags: IndexSet::default(),
         inaccessible: false,
         authenticated: false,
-        policies: Vec::new(),
-        scopes: Vec::new(),
-        cost: None,
-        list_size: None,
         used_as_key: false,
-        r#override: None,
-        override_label: None,
         by_graph: MapByGraph::default(),
         args: IndexMap::default(),
         description: None,
-        deprecated: None,
         ast: Ast::default(),
         internal_seen_non_external: false,
+        details: None,
     })
 }
 

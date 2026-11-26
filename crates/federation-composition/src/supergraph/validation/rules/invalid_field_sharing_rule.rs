@@ -97,21 +97,21 @@ impl<'s> SupergraphVisitor<'s> for InvalidFieldSharingRule<'s> {
         let mut resolvable_in: Vec<&str> = Vec::new();
 
         for (graph_id, field) in &field_state.by_graph {
-            let field_is_shareable = field.shareable;
-            let field_is_external = field.external;
+            let field_is_shareable = field.shareable();
+            let field_is_external = field.external();
             let field_is_used_as_key = field.used_as_key;
 
             if field_is_external {
                 continue;
             }
 
-            if is_effective_override(cx, field.r#override, |id| field_state.by_graph.contains_key(id)) {
+            if is_effective_override(cx, field.r#override(), |id| field_state.by_graph.contains_key(id)) {
                 // if a field tries to override some graph, check if it actually exists there.
                 // if it does, exclude it from invalid-field-sharing rule as override is effective.
                 continue;
             }
 
-            let fed_v1_field_in_extension = field.version == FederationVersion::V1_0 && field.extension;
+            let fed_v1_field_in_extension = field.version == FederationVersion::V1_0 && field.extension();
 
             if field_is_shareable || field_is_used_as_key || (object_type_state.is_entity && fed_v1_field_in_extension)
             {

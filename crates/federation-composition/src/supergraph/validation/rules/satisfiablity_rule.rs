@@ -492,31 +492,38 @@ mod tests {
         use crate::utils::collections::{IndexMap, IndexSet};
 
         use crate::specifications::federation::FederationVersion;
-        use crate::subgraph::state::{SubgraphFederation, SubgraphGraph, SubgraphSchema, SubgraphSpecs, SubgraphState};
+        use crate::subgraph::state::{
+            Field, SubgraphFederation, SubgraphGraph, SubgraphSchema, SubgraphSpecs, SubgraphState,
+        };
         use crate::supergraph::composition::object_type::{
             FieldStateInGraph, ObjectTypeFieldState, ObjectTypeState, ObjectTypeStateInGraph,
         };
         use crate::supergraph::state::SupergraphState;
 
-        fn field_in_graph(ty: &'static str) -> FieldStateInGraph<'static> {
-            FieldStateInGraph {
-                r#type: ty,
+        fn field_in_graph(name: &str, ty: &str) -> FieldStateInGraph<'static> {
+            let field: &'static Field = Box::leak(Box::new(Field {
+                name: name.to_string(),
+                r#type: ty.to_string(),
+                is_leaf: false,
+                args: IndexMap::default(),
                 external: false,
-                description: None,
                 inaccessible: false,
-                used: false,
-                r#override: None,
-                override_label: None,
-                provides: None,
-                requires: None,
-                provided: false,
-                required: false,
                 authenticated: false,
-                policies: &[],
-                scopes: &[],
+                extension: false,
+                required: false,
+                provided: false,
                 shareable: false,
                 used_as_key: false,
-                extension: false,
+                used: false,
+                description: None,
+                ast: Default::default(),
+                details: None,
+            }));
+            FieldStateInGraph {
+                field,
+                provides: None,
+                requires: None,
+                used_as_key: false,
                 version: FederationVersion::V2_3,
             }
         }
@@ -525,23 +532,19 @@ mod tests {
             ObjectTypeFieldState {
                 name,
                 r#type: ty,
-                tags: IndexSet::default(),
                 inaccessible: false,
                 is_leaf: false,
                 authenticated: false,
-                policies: vec![],
-                scopes: vec![],
-                cost: None,
-                list_size: None,
                 used_as_key: false,
-                r#override: None,
-                override_label: None,
-                by_graph: graphs.iter().map(|g| (g.to_string(), field_in_graph(ty))).collect(),
+                by_graph: graphs
+                    .iter()
+                    .map(|g| (g.to_string(), field_in_graph(name, ty)))
+                    .collect(),
                 args: IndexMap::default(),
                 description: None,
-                deprecated: None,
                 ast: Default::default(),
                 internal_seen_non_external: true,
+                details: None,
             }
         }
 
