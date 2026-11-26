@@ -34,10 +34,66 @@ pub use exports::*;
 // This crate is the final WebAssembly artifact, so it picks the allocator (the library crates
 // never do). Talc instead of the default dlmalloc: measured on the corpus through the shim,
 // 2-3% faster (huge-schema 304 -> 298 ms, test-suite geomean 0.302 -> 0.294 ms); rlsf was
-// slower than dlmalloc. Talc needs no `getrandom`, and this constructor needs no `unsafe`.
+// slower than dlmalloc. Talc needs no `getrandom`. It grows the memory through `GeometricGrow`
+// instead of talc's own `WasmGrowAndExtend`, see there.
 #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 #[global_allocator]
-static ALLOCATOR: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();
+static ALLOCATOR: talc::cell::TalcSyncCell<GeometricGrow, talc::wasm::WasmBinning> =
+    talc::cell::TalcSyncCell::new_wasm(GeometricGrow { end: None });
+
+/// Talc's `WasmGrowAndExtend` with geometric growth: each `memory.grow` adds at least a quarter
+/// of the current memory instead of just enough for the allocation (often one 64 KiB page).
+///
+/// V8 runs a full GC every dozen or so `memory.grow` calls (each grow detaches the old
+/// `ArrayBuffer` and accounts the whole memory as new external memory), and a full GC marks the
+/// whole JS heap, which holds the callers' graphql-js documents. Growing page by page to 1.4 GB
+/// on a 745-subgraph schema made `compose_services` spend 70% of its 450 s in GC; with geometric
+/// growth the memory grows a few dozen times instead of tens of thousands. Pages grown but not
+/// yet used are never touched, so they cost address space, not resident memory.
+#[cfg(target_family = "wasm")]
+#[derive(Debug)]
+pub struct GeometricGrow {
+    end: Option<std::ptr::NonNull<u8>>,
+}
+
+#[cfg(target_family = "wasm")]
+// SAFETY: only uses the `talc` it is given and does not allocate.
+unsafe impl talc::source::Source for GeometricGrow {
+    fn acquire<B: talc::base::binning::Binning>(
+        talc: &mut talc::base::Talc<Self, B>,
+        layout: std::alloc::Layout,
+    ) -> Result<(), ()> {
+        use core::arch::wasm32::{memory_grow, memory_size};
+        const PAGE: usize = 64 * 1024;
+        const MIN_PAGES: usize = 16; // 1 MiB
+
+        // Enough for `layout` with talc's chunk overhead and alignment (talc's own computation
+        // is private; this is an upper bound of it).
+        let needed = (layout.size() + layout.align() + 3 * talc::base::CHUNK_UNIT).div_ceil(PAGE);
+        let wanted = needed.max(memory_size::<0>() / 4).max(MIN_PAGES);
+        // Near the 4 GiB limit the geometric step can fail where the needed one still fits.
+        let (prev, delta) = match memory_grow::<0>(wanted) {
+            usize::MAX if wanted > needed => (memory_grow::<0>(needed), needed),
+            prev => (prev, wanted),
+        };
+        if prev == usize::MAX {
+            return Err(());
+        }
+
+        let base = (prev * PAGE) as *mut u8;
+        let new_end = base.wrapping_add(delta * PAGE);
+        if let Some(old_end) = talc.source.end.take() {
+            if old_end.as_ptr() == base {
+                // SAFETY: the memory from `old_end` to `new_end` was just grown and is unused.
+                talc.source.end = Some(unsafe { talc.extend(old_end, new_end) });
+                return Ok(());
+            }
+        }
+        // SAFETY: the memory was just grown and is unused.
+        talc.source.end = unsafe { talc.claim(base, delta * PAGE) };
+        Ok(())
+    }
+}
 
 thread_local! {
     static LAST_PANIC: RefCell<Option<PanicInfo>> = const { RefCell::new(None) };
