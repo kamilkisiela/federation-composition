@@ -2,12 +2,13 @@
 // "exports"), without the upstream test suite. Run with `pnpm test:npm` after `pnpm wasm:build`.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GraphQLError, parse } from "graphql";
+import { GraphQLError, parse, print } from "graphql";
 import * as api from "@lemonberrylabs/federation-composition-wasm";
 import {
   assertCompositionSuccess,
   composeSchemaContract,
   composeServices,
+  composeServicesFromSdl,
   compositionHasErrors,
   containsSupergraphSpec,
   sortSDL,
@@ -51,7 +52,7 @@ const reviews = {
 };
 
 test("exports the public API of @theguild/federation-composition", () => {
-  // src/index.ts of upstream at the UPSTREAM release.
+  // src/index.ts of upstream at the UPSTREAM release, plus composeServicesFromSdl.
   assert.deepEqual(Object.keys(api).sort(), [
     "FEDERATION_V1",
     "addInaccessibleToUnreachableTypes",
@@ -60,6 +61,7 @@ test("exports the public API of @theguild/federation-composition", () => {
     "assertCompositionSuccess",
     "composeSchemaContract",
     "composeServices",
+    "composeServicesFromSdl",
     "compositionHasErrors",
     "containsSupergraphSpec",
     "createCompositionSuccessReadCacheContainer",
@@ -88,6 +90,39 @@ test("composes a supergraph", () => {
     "Document",
   );
   assert.equal(sortSDL(result.publicDocumentNode).kind, "Document");
+});
+
+test("composes from SDL strings like composeServices does from documents", () => {
+  const sdl = (s) => ({ name: s.name, sdl: print(s.typeDefs) });
+  const result = composeServicesFromSdl([sdl(users), sdl(reviews)]);
+  assert.equal(result.errors, undefined);
+  assert.equal(
+    result.supergraphSdl,
+    composeServices([users, reviews]).supergraphSdl,
+  );
+
+  const failure = composeServicesFromSdl([
+    sdl(users),
+    {
+      name: "other",
+      sdl: /* GraphQL */ `
+        extend schema
+          @link(url: "https://specs.apollo.dev/federation/v2.3", import: ["@key"])
+
+        type User @key(fields: "id") {
+          id: ID!
+          name: Int!
+        }
+      `,
+    },
+  ]);
+  assert.ok(failure.errors[0] instanceof GraphQLError);
+  assert.equal(failure.errors[0].extensions.code, "FIELD_TYPE_MISMATCH");
+
+  assert.throws(
+    () => composeServicesFromSdl([{ name: "broken", sdl: "type Query {" }]),
+    (error) => error instanceof GraphQLError && /Syntax Error/.test(error.message),
+  );
 });
 
 test("reports composition errors as GraphQLErrors", () => {

@@ -10,6 +10,7 @@ first: it also checks out upstream into `conformance/upstream` and builds the np
 pnpm conformance                                  # upstream checkout, npm package, corpus
 pnpm bench:corpus guild-ts                        # upstream's TypeScript -> bench/results-guild-ts.json
 pnpm bench:corpus guild-wasm                      # the npm package       -> bench/results-guild-wasm.json
+pnpm bench:corpus guild-wasm-sdl                  # its SDL entry point   -> bench/results-guild-wasm-sdl.json
 pnpm bench:native                                 # native Rust           -> bench/results-guild-rust.json
 pnpm bench:native:mimalloc                        # native Rust, mimalloc -> bench/results-guild-rust-mimalloc.json
 node crates/federation-composition-napi/build.mjs # builds the napi-rs addon
@@ -30,8 +31,9 @@ bench/profile.sh [case-id] [seconds]              # where native time goes (macO
 By default only `composeServices()` on already-parsed graphql-js ASTs is timed. `BENCH_MODE=e2e`
 times what a schema service does instead, from each subgraph's SDL string to the supergraph SDL
 string (parse, compose, read `supergraphSdl`), and writes `results-<implementation>-e2e.json`.
-`guild-napi` ([`crates/federation-composition-napi`](../crates/federation-composition-napi), a
-Node-API addon that takes SDL strings) always runs that way. In e2e mode the two corpus cases whose
+`guild-wasm-sdl` (the npm package's `composeServicesFromSdl`, which parses and prints in
+WebAssembly) and `guild-napi` ([`crates/federation-composition-napi`](../crates/federation-composition-napi),
+a Node-API addon that takes SDL strings) always run that way. In e2e mode the two corpus cases whose
 hand-built ASTs do not print to parsable SDL are skipped.
 
 ## What moved when the TypeScript implementation was removed

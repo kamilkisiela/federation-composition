@@ -198,6 +198,47 @@ pub fn compose_services(services_json: &[u8], internal_json: Option<String>) -> 
     Ok(composition_out(result))
 }
 
+/// A subgraph given as SDL: `{ name, url?, sdl }`.
+#[derive(Deserialize)]
+struct SdlService {
+    name: String,
+    url: Option<String>,
+    sdl: String,
+}
+
+/// `composeServicesFromSdl(services, __internal)`: parses each subgraph's SDL here instead of
+/// taking graphql-js documents, composes, and prints the supergraph here, so only strings cross
+/// the boundary (as in the napi-rs addon). Returns `{ supergraphSdl }` or `{ errors }`, the
+/// errors as `GraphQLErrorJson[]` JSON. SDL that does not parse throws its `GraphQLError`, as
+/// graphql-js `parse` would.
+#[wasm_bindgen]
+pub fn compose_services_sdl(services_json: &[u8], internal_json: Option<String>) -> JsResult<JsValue> {
+    let services = from_json::<Vec<SdlService>>("services", services_json)?
+        .into_iter()
+        .map(|s| {
+            Ok(ServiceDefinition {
+                type_defs: graphql_core::parse(&s.sdl).map_err(ThrownError::graphql)?,
+                name: s.name,
+                url: s.url,
+            })
+        })
+        .collect::<JsResult<Vec<_>>>()?;
+    let result = match internal(internal_json)? {
+        // The public entry point also enforces the input limits (nesting depth).
+        None => fc::compose_services(&services).map_err(thrown)?,
+        Some(internal) => fc::__internal::compose::compose_services(&services, Some(&internal)).map_err(thrown)?,
+    };
+    drop(services);
+
+    let out = js_sys::Object::new();
+    let (key, value) = match result {
+        CompositionResult::Success(success) => ("supergraphSdl", JsValue::from_str(success.supergraph_sdl())),
+        CompositionResult::Failure(failure) => ("errors", JsValue::from_str(&to_json(failure.errors()))),
+    };
+    js_sys::Reflect::set(&out, &JsValue::from_str(key), &value)?;
+    Ok(out.into())
+}
+
 /// The library printer (`src/graphql/printer.ts` `print`) of a supergraph:
 /// the `supergraphSdl` / `publicSdl` getters → SDL string.
 #[wasm_bindgen]

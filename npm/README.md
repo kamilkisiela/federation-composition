@@ -61,6 +61,22 @@ if (compositionHasErrors(result)) {
 }
 ```
 
+### From SDL strings
+
+When the subgraphs arrive as SDL (a schema registry, files), `composeServicesFromSdl` skips
+graphql-js: the SDL is parsed and the supergraph printed in WebAssembly, so no document is built in
+JavaScript or copied into WebAssembly. It returns only `supergraphSdl` (or `errors`), and throws
+the `GraphQLError` of SDL that does not parse. It is not part of `@theguild/federation-composition`.
+
+```ts
+import { composeServicesFromSdl } from "@lemonberrylabs/federation-composition-wasm";
+
+const { supergraphSdl, errors } = composeServicesFromSdl([
+  { name: "users", sdl: usersSdl },
+  { name: "reviews", url: "http://reviews", sdl: reviewsSdl },
+]);
+```
+
 The package is an ES module for Node.js (it loads the WebAssembly module with Node's `require`).
 It needs Node.js 22.12 or later, where CommonJS code can also `require()` it.
 

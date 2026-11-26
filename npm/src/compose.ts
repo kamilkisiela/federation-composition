@@ -58,6 +58,42 @@ export function composeServices(
   );
 }
 
+/** A subgraph as SDL, for {@link composeServicesFromSdl}. */
+export interface SdlServiceDefinition {
+  name: string;
+  url?: string;
+  sdl: string;
+}
+
+export type SdlCompositionResult =
+  | { supergraphSdl: string; errors?: undefined }
+  | { supergraphSdl?: undefined; errors: GraphQLError[] };
+
+/**
+ * `composeServices` for subgraphs given as SDL strings: the SDL is parsed and the supergraph
+ * printed in WebAssembly, so no graphql-js document is built or copied on either side. Returns
+ * only the supergraph SDL (or the errors). SDL that does not parse throws its `GraphQLError`,
+ * as graphql-js `parse` would.
+ */
+export function composeServicesFromSdl(
+  services: ReadonlyArray<SdlServiceDefinition>,
+  __internal?: {
+    disableValidationRules?: string[];
+  },
+): SdlCompositionResult {
+  const out = call(
+    "compose_services_sdl",
+    encodeJSON(
+      services.map((s) => ({ name: String(s.name), url: s.url, sdl: s.sdl })),
+    ),
+    __internal === undefined ? undefined : JSON.stringify(__internal),
+  ) as { supergraphSdl: string } | { errors: string };
+  if ("errors" in out) {
+    return { errors: toGraphQLErrors(parseJSON<GraphQLErrorJSON[]>(out.errors)) };
+  }
+  return { supergraphSdl: out.supergraphSdl };
+}
+
 export function assertCompositionSuccess(
   compositionResult: CompositionResult,
   message?: string,

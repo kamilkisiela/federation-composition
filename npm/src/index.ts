@@ -4,11 +4,14 @@ export {
   assertCompositionFailure,
   assertCompositionSuccess,
   composeServices,
+  composeServicesFromSdl,
   compositionHasErrors,
   createCompositionSuccessReadCacheContainer,
   type CompositionFailure,
   type CompositionResult,
   type CompositionSuccess,
+  type SdlCompositionResult,
+  type SdlServiceDefinition,
 } from "./compose.js";
 export * from "./types.js";
 export * from "./validate.js";

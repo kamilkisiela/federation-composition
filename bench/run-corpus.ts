@@ -5,13 +5,14 @@
 // (node conformance/upstream-bin.mjs tsx --expose-gc bench/run-corpus.ts ...), where
 // <implementation> is "guild-ts" (upstream's TypeScript in conformance/upstream/src),
 // "guild-wasm" (the npm package @lemonberrylabs/federation-composition-wasm as built in npm/dist, so AST
-// conversion across the boundary is included) or "guild-napi" (the napi-rs addon built by
-// `node crates/federation-composition-napi/build.mjs`). Run `pnpm conformance` first; it checks out
-// upstream, builds the package and records the corpus.
+// conversion across the boundary is included), "guild-wasm-sdl" (the same package's
+// composeServicesFromSdl, which parses and prints in WebAssembly) or "guild-napi" (the napi-rs
+// addon built by `node crates/federation-composition-napi/build.mjs`). Run `pnpm conformance`
+// first; it checks out upstream, builds the package and records the corpus.
 //
 // BENCH_MODE=e2e times what a schema service does instead: from each subgraph's SDL string to the
-// supergraph SDL string (parse, compose, read `supergraphSdl`). guild-napi only takes SDL, so it
-// always runs this way.
+// supergraph SDL string (parse, compose, read `supergraphSdl`). guild-wasm-sdl and guild-napi only
+// take SDL, so they always run this way.
 // Native Rust uses the same protocol: crates/federation-composition/examples/corpus_bench.rs.
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -34,16 +35,19 @@ type Case = {
 };
 
 const [implementation = "guild-ts", outArg] = process.argv.slice(2);
-const e2e = process.env.BENCH_MODE === "e2e" || implementation === "guild-napi";
-const label =
-  e2e && implementation !== "guild-napi"
-    ? `${implementation}-e2e`
-    : implementation;
+// These take SDL strings, so they always run end to end.
+const sdlOnly = implementation === "guild-napi" || implementation === "guild-wasm-sdl";
+const e2e = process.env.BENCH_MODE === "e2e" || sdlOnly;
+const label = e2e && !sdlOnly ? `${implementation}-e2e` : implementation;
 const outFile = outArg ?? `bench/results-${label}.json`;
 
 const implementations = {
   "guild-ts": () => import("../conformance/upstream/src/compose.js"),
   "guild-wasm": () => import("../npm/dist/compose.js"),
+  "guild-wasm-sdl": async () => {
+    const { composeServicesFromSdl } = await import("../npm/dist/compose.js");
+    return { composeServices: composeServicesFromSdl };
+  },
   "guild-napi": async () =>
     createRequire(import.meta.url)(
       "../crates/federation-composition-napi/federation-composition.node",
@@ -97,7 +101,7 @@ const started = performance.now();
 for (const c of prepared) {
   const run = !e2e
     ? () => composeServices(c.services, c.internal)
-    : implementation === "guild-napi"
+    : sdlOnly
       ? () => composeServices(c.sdlServices, c.internal)
       : () => {
           const result = composeServices(
