@@ -1,10 +1,11 @@
 // Deduplicates the compositions recorded by capture-setup.ts into the corpus
 // (conformance/out/corpus.jsonl), then appends the three benchmark fixtures of
-// upstream's __tests__/fixtures with their TypeScript output.
+// upstream's __tests__/fixtures and bench/fixtures/edge0 with their TypeScript output.
 //
 // Usage (run.mjs does this): tsx conformance/build-corpus.ts <raw.jsonl> <corpus.jsonl>
 import { createHash } from "node:crypto";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { parse } from "./upstream/node_modules/graphql/index.js";
 import { getSubgraphs as dgs } from "./upstream/__tests__/fixtures/dgs/index.js";
 import { getSubgraphs as huge } from "./upstream/__tests__/fixtures/huge-schema/index.js";
 import { createStarsStuff } from "./upstream/__tests__/fixtures/stars-stuff.js";
@@ -35,10 +36,22 @@ for (const line of readFileSync(RAW, "utf8").split("\n")) {
   }
 }
 
+/** One subgraph per `.graphqls` file, named after the file, as upstream's fixture loaders do. */
+function readSchemas(dir: URL) {
+  return readdirSync(dir)
+    .filter((file) => file.endsWith(".graphqls"))
+    .sort()
+    .map((file) => ({
+      name: file.replace(".graphqls", ""),
+      typeDefs: parse(readFileSync(new URL(file, dir), "utf8"), { noLocation: true }),
+    }));
+}
+
 const fixtures: Array<[string, Array<{ name: string; typeDefs: any }>]> = [
   ["fixture:stars-stuff", Object.values(createStarsStuff())],
   ["fixture:dgs", await dgs()],
   ["fixture:huge-schema", await huge()],
+  ["fixture:edge0", readSchemas(new URL("../bench/fixtures/edge0/", import.meta.url))],
 ];
 for (const [id, services] of fixtures) {
   const result = composeServices(services);

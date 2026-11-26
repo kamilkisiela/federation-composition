@@ -42,7 +42,8 @@ Conformance with upstream v0.27.0 (6272ad80299b):
    [`capture-setup.ts`](capture-setup.ts), which wraps `composeServices` and records each call's
    input and TypeScript output. [`build-corpus.ts`](build-corpus.ts) deduplicates the calls and
    adds the three benchmark fixtures of upstream's `__tests__/fixtures` (`stars-stuff`, `dgs`,
-   `huge-schema`) into the corpus, `conformance/out/corpus.jsonl`. Each line is
+   `huge-schema`) and [`bench/fixtures/edge0`](../bench/fixtures/edge0) (745 subgraphs, about 4
+   minutes to compose in TypeScript) into the corpus, `conformance/out/corpus.jsonl`. Each line is
    `{ id, source: "tests" | "fixture", services, internal?, success, expected }`, where `id` is a
    hash of the input and `expected` is the TypeScript output (`{ supergraphSdl, publicSdl }` or
    `{ errors: [{ message, code }] }`).

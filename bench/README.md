@@ -3,7 +3,7 @@
 The research site's speed numbers ([research/](../research), `research/data/*.json`) come from
 replaying the same corpus of compositions through each implementation. The corpus is the one the
 conformance check records (`conformance/out/corpus.jsonl`: every composition upstream's test suite
-performs, plus the `stars-stuff`, `dgs` and `huge-schema` fixtures), so run `pnpm conformance`
+performs, plus the `stars-stuff`, `dgs`, `huge-schema` and `edge0` fixtures), so run `pnpm conformance`
 first: it also checks out upstream into `conformance/upstream` and builds the npm package.
 
 ```sh
